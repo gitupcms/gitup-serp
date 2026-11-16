@@ -53,6 +53,8 @@ export interface SerpRecord {
     verdict_reason: string | null;
     /** Where this page's time went; only the phases that happened. */
     timings?: Timings;
+    /** Which egress served it, when a fallback proxy is set (`FALLBACK_PROXY`). */
+    egress?: "cloudflare" | "fallback";
   };
   search_parameters: SearchParams & { engine: "google"; device: "desktop" };
   exit?: Record<string, unknown>;

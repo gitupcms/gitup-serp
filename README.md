@@ -119,6 +119,8 @@ All optional, in `.env`:
 | `EGRESS_PREFIX` | `openserp-egress` | Worker name prefix; `egress:up`/`down` replace every Worker with it. |
 | `PACE_MS` | 3000 | Minimum gap between any two Google result pages; grows 1.5x on each refusal (up to 60 s), shrinks after 20 served pages. 0 = off. |
 | `BREAKER_COOLDOWN_S` | 300 | After 6 refused exits in a row, wait this long, then try one query; each failed try doubles it (up to 30 min). The CLI waits; the API answers `retry after N s`. |
+| `FALLBACK_PROXY` | unset | Paid proxy (same format as `SCRAPER_PROXY`) used only while Google blocks the Cloudflare egress: refused queries retry on it once, and it serves until Cloudflare's breaker reopens. Starts on demand, keeps no spares. Records show `search_metadata.egress`. |
+| `FALLBACK_IDLE_S` | 600 | Close the fallback's browsers after this many seconds without a fallback query. |
 | `BROWSER_MAX_PAGES` | 50 | Restart the browser after this many pages (0 = never). |
 | `EXIT_MAX_QUERIES` | 300 | Take a new exit session after this many queries (0 = never). |
 | `TRUST_PROXY` | off | Rate-limit by the first `X-Forwarded-For` address. Only behind a proxy that overwrites that header. |
