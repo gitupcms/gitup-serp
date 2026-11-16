@@ -30,7 +30,12 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Kota sayacı (`src/egress/usage.ts`): UTC günü bazında sayıyor, %80'de uyarı veriyor, %100'de 429 dönüyor. Sayım `egress:ls` ile görülüyor. Durum klasörü `EGRESS_STATE_DIR` ile değiştirilebiliyor.
 - [+] 401/400 durumu canlıda doğrulandı. Yanlış token'la eksiksiz WebSocket isteği 401 alıyor. 400, `Sec-WebSocket-Key` eksik olduğunda isteği Cloudflare'in reddetmesinden geliyor, bizim koddan değil.
 - [+] Yük testi: 50 sorgu (CLI, link çözme kapalı) **50/50 başarılı**, hiç engel yok. Ortanca süre 5,2 sn, p90 6,6 sn. İlk sorgu ısınmayla birlikte 46 sn sürdü.
-- [ ] Daha büyük yük testi: 500+ sorgu ve `POOL_SIZE` > 1.
+- [+] Büyük yük testi yapıldı (510 sorgu, `POOL_SIZE=2`, linkler kapalı). Cloudflare çıkışının asıl sınırı ortaya çıktı:
+  - 1. çalıştırma: dakikada yaklaşık 12 sorgu hızla ilk 91 sorgu temiz geçti. Yaklaşık 7. dakikada `sorry` başladı, 168. sorguda devre kesici açıldı. Toplam 158 başarılı sorgu. O sürümde kesici kalıcı açık kaldığı için kalan 343 sorgu Google'a hiç gitmeden düştü (düzeltildi, aşağıda).
+  - 2. çalıştırma, 10 dk sonra, uyarlanır hız ve kendiliğinden toparlanan kesiciyle: 14 sorgu geçti, sonra `sorry` geldi. Hız 3 sn'den 60 sn'ye çıktı. Kesici 5, 10, 20 ve 30 dk bekleyip denedi; her deneme reddedildi. İlk engelden yaklaşık 50 dk sonra hâlâ engelliydi, test orada durduruldu.
+  - Sonuç: Google, Cloudflare'in paylaşılan çıkış aralığını kısa sürede yaklaşık 250 sorgudan sonra en az 50 dk engelliyor. Sorun hız değil, IP aralığının itibarı: 60 sn aralıkla bile reddedildi. Kesici artık çökmüyor, bekleyip yeniden deniyor (canlıda doğrulandı).
+- [ ] Engelin ne kadar sürdüğünü ölçmek: birkaç saat sonra canary ile tekrar denenecek. Günlük canary bunu zaten kendiliğinden ölçecek.
+- [ ] Yüksek hacim için: Cloudflare çıkışını varsayılan olarak tutup, engellenince ikinci bir upstream'e (`SCRAPER_PROXY`, örneğin kendi VPS'in ya da residential proxy) düşmek. Birden çok Cloudflare hesabı muhtemelen işe yaramaz, çünkü çıkış IP aralığı aynı.
 - [ ] Birden çok Cloudflare hesabı: kota ve IP çeşitliliği için. İkinci bir hesap gerekiyor; şu an tek hesapla günde 100 bin istek fazlasıyla yetiyor.
 - [+] Çıkış ülkesi: Cloudflare'de seçilemiyor, ama artık gerek kalmadı. Varsayılan `DEFAULT_GL=us` ve `DEFAULT_HL=en`; `location` verilmezse gl ülkesi uule olarak gönderiliyor. Canlıda yerel paket artık doğru ülkeden geliyor: us için Colorado ve Missouri, tr için Gaziantep ve Bursa. Önceden Londra geliyordu. Şehir düzeyinde konum için `location` verilmeli.
 
@@ -43,7 +48,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Sorgu başına en fazla 3 çıkış. Üst üste 6 retten sonra devre kesici (breaker) devreye girip durumu `down` yapıyor. `unknown` gelirse çıkış yakılmıyor.
 - [+] `AbortSignal` destekleniyor, temizlik ve kapanış düzgün yapılıyor.
 - [~] Consent seçicileri ve ısınma turu canlıda çalıştı, ancak başka diller ve ülkeler denenmedi.
-- [ ] `POOL_SIZE` > 1 canlıda denenecek. serpmaven'deki `--workers` (16'ya kadar) karşılığı.
+- [+] `POOL_SIZE` > 1 canlıda denendi (2 kimlik + 1 yedek). Çalışıyor, ama Cloudflare çıkışının engellenme sınırı yüzünden paralellik toplam kapasiteyi artırmıyor; yalnızca engele daha hızlı ulaştırıyor.
 - [+] Tarayıcı her `BROWSER_MAX_PAGES` (varsayılan 50) sayfada aynı profil ve çerezlerle yeniden başlıyor, ardından 5-15 sn bekliyor. Restart sonrası çerezlerin korunduğu sahte Google'la denendi. Canlıda da görüldü: yeniden başlatma 1,6 sn, ardından 11,6 sn bekleme. Chromium'un belleği yeniden başlatmadan sonra yaklaşık 1,5 GB'tan 0,9 GB'a indi (kaba ölçüm, 2 sn aralıklı RSS). Tarayıcı yalnızca HTTP denemesi tutmazsa açıldığı için 10 sorguda bir kez yeniden başladı.
 - [+] Çıkış başına en fazla sorgu sayısı: `EXIT_MAX_QUERIES` (varsayılan 300).
 - [-] İlk sorguyu arama kutusuna yazarak yapma (serpmaven `_query`): yapılmadı. URL ile açmak canlıda sorun çıkarmadı; engel oranı artarsa yeniden bakılır.
