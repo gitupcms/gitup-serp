@@ -2,6 +2,7 @@
 import { readEgressState } from "./egress/state.js";
 import { EgressTunnel } from "./egress/tunnel.js";
 import { z } from "zod";
+import { DdgSearcher } from "./scraper/ddg.js";
 import { FailoverSearcher, FALLBACK_IDLE_S } from "./scraper/failover.js";
 import { createScraper } from "./scraper/index.js";
 import { ProxyTemplate } from "./scraper/proxy.js";
@@ -17,6 +18,8 @@ export interface Runtime {
 
 /** Logs go to stderr so stdout stays clean for CLI output and MCP JSON-RPC. */
 export async function startRuntime(env: NodeJS.ProcessEnv = process.env): Promise<Runtime> {
+  const engineFallback = env.ENGINE_FALLBACK || undefined;
+  if (engineFallback && engineFallback !== "duckduckgo") throw new Error(`invalid config: ENGINE_FALLBACK: only "duckduckgo", got "${engineFallback}"`);
   let tunnel: EgressTunnel | undefined;
   const egress = env.SCRAPER_PROXY ? undefined : readEgressState();
   if (egress) {
@@ -46,6 +49,12 @@ export async function startRuntime(env: NodeJS.ProcessEnv = process.env): Promis
     searcher = new FailoverSearcher(made.scraper, () => createScraper(fallbackEnv).scraper, idle.data * 1000);
     console.error(`fallback: ${proxy.describe()}, starts on demand`);
   }
+  if (engineFallback && tunnel) {
+    // Last in line: after the residential fallback too, when that is set.
+    const ddg = DdgSearcher.over(new ProxyTemplate(env.SCRAPER_PROXY).forSession(""));
+    searcher = new FailoverSearcher(searcher, () => ddg);
+    console.error("engine fallback: duckduckgo, only while Google refuses");
+  } else if (engineFallback) console.error("ENGINE_FALLBACK ignored: it needs the Cloudflare egress, not SCRAPER_PROXY");
   return {
     searcher,
     live: true,

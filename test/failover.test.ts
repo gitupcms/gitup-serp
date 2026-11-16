@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DdgSearcher } from "../src/scraper/ddg.js";
 import { FailoverSearcher } from "../src/scraper/failover.js";
 import type { SearchParams, SerpRecord, VerdictKind } from "../src/types.js";
 
@@ -154,6 +155,45 @@ describe("FailoverSearcher routing", () => {
   });
 });
 
+describe("FailoverSearcher nested (residential, then DuckDuckGo)", () => {
+  it("keeps an egress an inner layer set", async () => {
+    const ddgRecord = () => ({ ...record(), search_metadata: { ...record().search_metadata, egress: "cloudflare" as const } });
+    const f = new FailoverSearcher(fake(refusal), () => fake(ddgRecord));
+    expect((await f.search(P)).search_metadata.egress).toBe("cloudflare");
+  });
+
+  it("reaches the last fallback when the residential fallback refuses too, and keeps each layer's egress", async () => {
+    const primary = fake(refusal);
+    const residential = fake(refusal);
+    const ddg = fake(() => ({ ...record(), search_metadata: { ...record().search_metadata, egress: "cloudflare" as const, engine: "duckduckgo" as const } }));
+    const f = new FailoverSearcher(new FailoverSearcher(primary, () => residential), () => ddg);
+    const r = await f.search(P);
+    expect(r.search_metadata).toMatchObject({ status: "Success", engine: "duckduckgo", egress: "cloudflare" });
+    expect([primary.search, residential.search, ddg.search].map((s) => s.mock.calls.length)).toEqual([1, 1, 1]);
+
+    // The residential fallback serves: DuckDuckGo is not asked, the record says fallback.
+    residential.search.mockImplementationOnce(async () => record());
+    expect((await f.search(P)).search_metadata.egress).toBe("fallback");
+    expect(ddg.search).toHaveBeenCalledOnce();
+
+    // Primary down and the residential breaker open: still DuckDuckGo.
+    primary.h = { state: "down", reason: "blocked", retry_in: 300 };
+    residential.search.mockImplementationOnce(async () => record({ status: "Error", verdict: null, error: "scraper is down: x; retry after 9 s" }));
+    expect((await f.search(P)).search_metadata.engine).toBe("duckduckgo");
+    expect(primary.search).toHaveBeenCalledTimes(2);
+    expect(ddg.search).toHaveBeenCalledTimes(2);
+  });
+
+  it("a Google record from the primary stays cloudflare and never reaches DuckDuckGo", async () => {
+    const ddg = fake();
+    const f = new FailoverSearcher(new FailoverSearcher(fake(), makeFallback), () => ddg);
+    const r = await f.search(P);
+    expect(r.search_metadata.egress).toBe("cloudflare");
+    expect(r.search_metadata.engine).toBeUndefined();
+    expect(ddg.search).not.toHaveBeenCalled();
+  });
+});
+
 describe("FailoverSearcher fallback lifetime", () => {
   it("closes the fallback after the idle time and builds a new one on the next need", async () => {
     vi.useFakeTimers();
@@ -264,6 +304,38 @@ describe("startRuntime picks failover", () => {
     expect((await startRuntime({})).searcher).not.toBeInstanceOf(FailoverSearcher);
     made.egress = undefined;
     const rt = await startRuntime({ SCRAPER_PROXY: "http://h:1", FALLBACK_PROXY: "http://u:p@r:2" });
+    expect(rt.searcher).not.toBeInstanceOf(FailoverSearcher);
+  });
+
+  it("ENGINE_FALLBACK without FALLBACK_PROXY: cloudflare, then DuckDuckGo", async () => {
+    const { startRuntime } = await import("../src/bootstrap.js");
+    made.egress = egress;
+    const rt = await startRuntime({ ENGINE_FALLBACK: "duckduckgo" });
+    const f = rt.searcher as FailoverSearcher;
+    expect(f).toBeInstanceOf(FailoverSearcher);
+    const inner = f as unknown as { primary: unknown; makeFallback: () => unknown };
+    expect(inner.primary).not.toBeInstanceOf(FailoverSearcher);
+    expect(inner.makeFallback()).toBeInstanceOf(DdgSearcher);
+    expect(vi.mocked(console.error).mock.calls.flat()).toContain("engine fallback: duckduckgo, only while Google refuses");
+    await rt.close();
+  });
+
+  it("ENGINE_FALLBACK with FALLBACK_PROXY: residential nested inside, DuckDuckGo last", async () => {
+    const { startRuntime } = await import("../src/bootstrap.js");
+    made.egress = egress;
+    const rt = await startRuntime({ ENGINE_FALLBACK: "duckduckgo", FALLBACK_PROXY: "http://u:p@r.example:2" });
+    const outer = rt.searcher as unknown as { primary: unknown; makeFallback: () => unknown };
+    expect(outer.primary).toBeInstanceOf(FailoverSearcher);
+    expect(outer.makeFallback()).toBeInstanceOf(DdgSearcher);
+    await rt.close();
+  });
+
+  it("rejects an unknown ENGINE_FALLBACK, and ignores it without the cloudflare egress", async () => {
+    const { startRuntime } = await import("../src/bootstrap.js");
+    made.egress = egress;
+    await expect(startRuntime({ ENGINE_FALLBACK: "bing" })).rejects.toThrow(/ENGINE_FALLBACK/);
+    made.egress = undefined;
+    const rt = await startRuntime({ SCRAPER_PROXY: "http://h:1", ENGINE_FALLBACK: "duckduckgo" });
     expect(rt.searcher).not.toBeInstanceOf(FailoverSearcher);
   });
 

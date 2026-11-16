@@ -55,6 +55,8 @@ export interface SerpRecord {
     timings?: Timings;
     /** Which egress served it, when a fallback proxy is set (`FALLBACK_PROXY`). */
     egress?: "cloudflare" | "fallback";
+    /** Which search engine served it; unset means Google. "duckduckgo" only with `ENGINE_FALLBACK`. */
+    engine?: "google" | "duckduckgo";
   };
   search_parameters: SearchParams & { engine: "google"; device: "desktop" };
   exit?: Record<string, unknown>;

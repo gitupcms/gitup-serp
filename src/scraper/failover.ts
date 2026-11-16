@@ -62,7 +62,7 @@ export class FailoverSearcher implements Searcher {
   }
 
   private async viaFallback(params: SearchParams, signal: AbortSignal | undefined, why: string): Promise<SerpRecord> {
-    if (!this.onFallback) console.error(`switching to the fallback proxy (${why})`);
+    if (!this.onFallback) console.error(`switching to the fallback (${why})`);
     this.onFallback = true;
     clearTimeout(this.idleTimer);
     if (!this.fallback) {
@@ -87,7 +87,7 @@ export class FailoverSearcher implements Searcher {
       const fallback = this.fallback;
       if (!fallback || this.inFlight) return;
       this.fallback = null;
-      console.error(`fallback idle for ${Math.round(this.idleMs / 1000)}s: closing its browsers`);
+      console.error(`fallback idle for ${Math.round(this.idleMs / 1000)}s: closing it`);
       fallback.close().catch((err) => console.error(`closing fallback: ${redact(err instanceof Error ? err.message : String(err))}`));
     }, this.idleMs);
     this.idleTimer.unref?.();
@@ -101,7 +101,8 @@ export class FailoverSearcher implements Searcher {
   }
 }
 
+/** An inner layer's tag stays: a nested failover or DuckDuckGo already knows the true egress. */
 function tag(r: SerpRecord, egress: "cloudflare" | "fallback"): SerpRecord {
-  r.search_metadata.egress = egress;
+  r.search_metadata.egress ??= egress;
   return r;
 }

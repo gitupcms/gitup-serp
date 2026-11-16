@@ -288,6 +288,7 @@ function doctor(deps: Deps): number {
   }
   // Optional, so it never fails the doctor.
   checks.push([true, `FALLBACK_PROXY ${deps.env.FALLBACK_PROXY ? "is set" : "is not set (optional)"}`]);
+  checks.push([true, `ENGINE_FALLBACK ${deps.env.ENGINE_FALLBACK ? `is set (${deps.env.ENGINE_FALLBACK})` : "is not set (optional)"}`]);
   for (const name of ["CF_API_TOKEN", "CF_ACCOUNT_ID"]) {
     checks.push([Boolean(deps.env[name]), `${name} ${deps.env[name] ? "is set" : "is not set"}`]);
   }
