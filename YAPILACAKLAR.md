@@ -96,14 +96,14 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] `npm run mcp`: stdio JSON-RPC, SDK yok, tek araç `google_search(query, pages 1-3, hl, gl, links)`. Runtime ilk çağrıda başlatılıyor (lazy).
 - [+] Kısa yanıt biçimi: `results`, `related_questions`, `related_searches`, `ai_overview`, `places`, `errors`.
 - [+] Canlı: `tools/call` ile 9 sonuç geldi, linkler ve AI Overview dolu. stdout yalnızca JSON satırlarından oluşuyor.
-- [ ] Claude Desktop ve Claude Code için örnek ayar (README).
+- [+] Claude Desktop ve Claude Code için örnek ayar (README). `npm --prefix` ile başka klasörden de başlıyor.
 
 ## 8. Dağıtım ve işletim
 - [+] `npm run setup`: Chromium (`.browsers/`) ve curl-impersonate (`bin/`).
 - [+] `.env` ve `.env.example`; `npm start` `.env` dosyasını okuyor.
 - [+] Dockerfile: Node 22, Xvfb, tini, root olmayan kullanıcı, `HEALTHCHECK`, `/data` birimi. `docker run IMAGE cli|mcp|egress:*` çalışıyor. İmaj 2,1 GB ve yalnızca x86_64. Egress yoksa `/health` 503 döndüğü için konteyner `unhealthy` görünür.
 - [+] CI (GitHub Actions): tip kontrolü, testler, Worker paketi ve ayrı bir `docker build` işi. Gizli anahtar kullanmıyor, canlı çağrı yapmıyor.
-- [~] README: kısa kurulum ve kaynakça var. Cloudflare token adımları ve API örnekleri eksik.
+- [+] README: kurulum, Cloudflare token adımları, API, CLI, MCP ve Docker örnekleri, kaynakça.
 - [+] İlk commit (`gitupcms/gitup-serp`).
 
 ## 9. Bilerek yapılmayanlar

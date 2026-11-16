@@ -15,7 +15,92 @@ npm start                     # http://127.0.0.1:8080/search.json?q=hono
 npm run egress:down           # remove the Workers
 ```
 
-This needs a display, because Chromium runs headful. On a server, use Xvfb.
+This needs a display, because Chromium runs headful. On a server, use Xvfb, or run it in Docker (below).
+
+`npm run cli -- doctor` checks the setup offline. It never prints secret values.
+
+## Cloudflare token
+
+1. In the Cloudflare dashboard, go to **My Profile → API Tokens → Create Token** and pick the **Edit Cloudflare Workers** template.
+2. Limit **Account Resources** to your account, then create the token.
+3. Put the token in `.env` as `CF_API_TOKEN`. Put your account ID, from the right sidebar of the Workers & Pages page, in `CF_ACCOUNT_ID`.
+
+`egress:up` creates a `workers.dev` subdomain if your account has none. Run `egress:ls` to see the deployed Workers and today's request count.
+
+The free plan allows 100k Worker requests per day, and each tunnel connection counts as one. The local tunnel warns at 80% of `EGRESS_DAILY_LIMIT` and refuses new connections at 100%.
+
+Two things are fixed by Cloudflare:
+- The exit IP changes on every connection.
+- You cannot choose the exit country.
+
+Without `gl`, Google may answer in the language of the exit IP. Pass `hl` and `gl` when that matters.
+
+## HTTP API
+
+```bash
+curl 'http://127.0.0.1:8080/search.json?q=hono&hl=en&gl=us'
+curl -H "Authorization: Bearer $OPENSERP_API_KEY" 'http://host:8080/search.json?q=hono&pages=2&links=0'
+curl 'http://127.0.0.1:8080/search.json?q=hono&async=true'   # returns an id right away
+curl 'http://127.0.0.1:8080/searches/<id>.json'              # the result, kept for 1 hour
+curl 'http://127.0.0.1:8080/health'
+```
+
+Parameters:
+
+| Parameter | Meaning |
+| --- | --- |
+| `q` | The query. Required. |
+| `pages` | Number of pages, from 1 to `MAX_PAGES` (default 3). |
+| `hl` | Interface language. Default `en`. |
+| `gl` | Country code, such as `us`. |
+| `location` | Location, sent to Google as uule. |
+| `tbs`, `cr`, `lr` | Google's own filters. |
+| `links` | How many result links to resolve. `0` turns it off and makes the query much faster. |
+| `async` | `true` returns an id right away. |
+
+Pass the key as `Authorization: Bearer`; `?api_key=` is refused. Binding to anything other than loopback requires `OPENSERP_API_KEY`.
+
+## CLI
+
+```bash
+npm run cli -- search "hono framework" --pages 2 --format csv --output out.csv
+npm run cli -- search --input queries.txt --output out.jsonl --resume
+```
+
+`npm link` puts the same CLI on your PATH as `gitup-serp`.
+
+## MCP
+
+The MCP server talks JSON-RPC over stdio and exposes one tool, `google_search`.
+
+Claude Code:
+
+```bash
+claude mcp add gitup-serp -- npm run -s --prefix /path/to/gitup-serp mcp
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "gitup-serp": { "command": "npm", "args": ["run", "-s", "--prefix", "/path/to/gitup-serp", "mcp"] }
+  }
+}
+```
+
+Run `npm run egress:up` first, or set `SCRAPER_PROXY` in `.env`.
+
+## Docker
+
+```bash
+docker build -t gitup-serp .
+docker run --rm --env-file .env -v gitup-serp-data:/data gitup-serp egress:up 3
+docker run -d -p 8080:8080 --env-file .env -e OPENSERP_API_KEY=change-me -v gitup-serp-data:/data gitup-serp
+docker run --rm -i --env-file .env -v gitup-serp-data:/data gitup-serp mcp
+```
+
+The `/data` volume keeps the egress state and the usage counter. The image is x86_64 only.
 
 ## Credits
 
