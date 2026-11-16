@@ -4,7 +4,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import { poisoned } from "../classify/index.js";
 import { type Parsed, parseSerp } from "../parse/index.js";
@@ -17,6 +16,14 @@ import { ProxyTemplate, redact } from "./proxy.js";
 
 export const MAX_EXITS = 3;
 export const BREAKER = 6;
+/** Down this long after the breaker trips, then one query tries (`BREAKER_COOLDOWN_S`); doubles on each failed try. */
+export const BREAKER_COOLDOWN_MS = 300_000;
+export const BREAKER_COOLDOWN_MAX_MS = 1_800_000;
+/** Least gap between any two results requests across all identities (`PACE_MS`); grows on refusals. */
+export const PACE_MS = 3_000;
+export const PACE_MAX_MS = 60_000;
+/** Served pages in a row after which the pace shrinks by 10%. */
+const PACE_SHRINK_AFTER = 20;
 export const GAP_MS: [number, number] = [2_000, 5_000];
 /** Browser results pages before the browser restarts on the same profile (serpmaven: 50); 0 never. */
 export const BROWSER_MAX_PAGES = 50;
@@ -41,11 +48,17 @@ export interface ScraperOptions {
   linkBudgetMs?: number;
   /** Warm identities kept ready beyond the pool to replace a retired one at once (`SPARE_IDENTITIES`); 0 off. */
   spares?: number;
+  /** See `BREAKER_COOLDOWN_MS`. */
+  breakerCooldownMs?: number;
+  /** Starting global pace (`PACE_MS`); 0, the default here, turns it off. */
+  paceMs?: number;
 }
 
 interface Slot {
   identity: Identity | null;
   busy: boolean;
+  /** A warm-up runs for this slot; keeps a half-open retry from starting a second one. */
+  warming: boolean;
   queries: number;
   lastPageAt: number;
   /** Whether each recent judged page was unrelated to its query (see classify `poisoned`). */
@@ -54,6 +67,22 @@ interface Slot {
 
 const message = (err: unknown) => redact(err instanceof Error ? err.message : String(err));
 const seconds = (since: number) => ((performance.now() - since) / 1000).toFixed(1);
+
+/** On the global timer so tests can fake time; rejects with the signal's reason on abort. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /** Stop waiting when `signal` aborts; `p` itself runs on. */
 function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -158,6 +187,16 @@ export class Scraper implements Searcher {
   private waiters = new Set<() => void>();
   private refusedInRow = 0;
   private downReason: string | null = null;
+  /** While down, when the half-open try may start (performance.now() ms). */
+  private downUntil = 0;
+  /** The cooldown the next trip gets; back to the base after a served page. */
+  private cooldownMs: number;
+  /** The one query let through while half-open, and the reason it is trying. */
+  private probe: { token: object; reason: string } | null = null;
+  /** Current global pace, when the last results request started, and served pages since the last refusal. */
+  private pace: number;
+  private paceStart = -Infinity;
+  private servedInRow = 0;
   private lastError = "";
   private readonly origin: string;
   private readonly gapMs: [number, number];
@@ -165,21 +204,55 @@ export class Scraper implements Searcher {
   constructor(private readonly opts: ScraperOptions) {
     this.origin = opts.origin ?? GOOGLE;
     this.gapMs = opts.gapMs ?? GAP_MS;
-    this.slots = Array.from({ length: opts.poolSize }, () => ({ identity: null, busy: false, queries: 0, lastPageAt: 0, lowRelevance: [] }));
+    this.cooldownMs = opts.breakerCooldownMs ?? BREAKER_COOLDOWN_MS;
+    this.pace = opts.paceMs ?? 0;
+    this.slots = Array.from({ length: opts.poolSize }, () => ({ identity: null, busy: false, warming: false, queries: 0, lastPageAt: 0, lowRelevance: [] }));
     for (const slot of this.slots) this.warm(slot);
     this.refillSpares();
   }
 
   health() {
-    if (this.downReason) return { state: "down" as const, reason: this.downReason };
+    const pace = Math.round(this.pace);
+    const down = this.down();
+    if (down) return { state: "down" as const, reason: down, retry_in: this.retryIn(), pace };
     const ready = this.slots.filter((s) => s.identity);
-    const info = { pool: this.slots.length, ready: ready.length, spares: this.spares.length };
+    const info = { pool: this.slots.length, ready: ready.length, spares: this.spares.length, pace };
     if (!ready.length) return { state: "warming" as const, ...info };
     if (ready.every((s) => s.busy)) return { state: "busy" as const, ...info };
     return { state: "ok" as const, ...info };
   }
 
   async search(params: SearchParams, signal?: AbortSignal): Promise<SerpRecord> {
+    const token = {};
+    if (this.downReason && !this.probe && performance.now() >= this.downUntil) this.halfOpen(token);
+    try {
+      return await this.run(params, token, signal);
+    } finally {
+      if (this.probe?.token === token) this.probe = null;
+    }
+  }
+
+  /** Why queries other than the half-open try (`token`) may not run now; null when they may. */
+  private down(token?: object): string | null {
+    if (this.downReason) return this.downReason;
+    return this.probe && this.probe.token !== token ? `${this.probe.reason}; one query is trying` : null;
+  }
+
+  /** Whole seconds until the half-open try; 0 once it may start or is running. */
+  private retryIn(): number {
+    return Math.max(0, Math.ceil((this.downUntil - performance.now()) / 1000));
+  }
+
+  /** The cooldown is over: let this query through, with fresh identities where the old ones were dropped. */
+  private halfOpen(token: object): void {
+    this.probe = { token, reason: this.downReason! };
+    this.downReason = null;
+    console.error("breaker half-open: one query tries");
+    for (const slot of this.slots) if (!slot.identity && !slot.warming) this.warm(slot);
+    this.refillSpares();
+  }
+
+  private async run(params: SearchParams, token: object, signal?: AbortSignal): Promise<SerpRecord> {
     const started = performance.now();
     const url = resultsUrl(this.origin, params);
     let verdict: Verdict | null = null;
@@ -187,13 +260,13 @@ export class Scraper implements Searcher {
     let exit: Record<string, unknown> = { session: null, proxy_host: null };
     const timings: Clock = { retries: [] };
     const add = (k: "queue" | "links", since: number) => void (timings[k] = (timings[k] ?? 0) + performance.now() - since);
-    for (let i = 0; i < MAX_EXITS && !this.downReason; i++) {
+    for (let i = 0; i < MAX_EXITS && !this.down(token); i++) {
       let slot: Slot;
       const queued = performance.now();
       try {
         slot = await this.acquire(signal);
       } catch (err) {
-        if (this.downReason && !signal?.aborted) break;
+        if (this.down(token) && !signal?.aborted) break;
         throw err;
       } finally {
         add("queue", queued);
@@ -254,6 +327,8 @@ export class Scraper implements Searcher {
         }
         if (answer.verdict.kind === "serp") {
           this.refusedInRow = 0;
+          this.cooldownMs = this.opts.breakerCooldownMs ?? BREAKER_COOLDOWN_MS;
+          if (++this.servedInRow % PACE_SHRINK_AFTER === 0) this.setPace(this.pace * 0.9, `${this.servedInRow} pages served in a row`);
           keep = true;
           return buildRecord(params, started, { url: answer.fetched.url, verdict: answer.verdict, exit, parsed, timings });
         }
@@ -264,6 +339,8 @@ export class Scraper implements Searcher {
         }
         [verdict, error] = [answer.verdict, ""];
         timings.retries!.push(answer.verdict.kind);
+        this.servedInRow = 0;
+        this.setPace(this.pace * 1.5, answer.verdict.kind);
         this.retire(slot, identity);
       } finally {
         const restart = settled && keep ? this.upkeep(slot, identity) : undefined;
@@ -278,7 +355,8 @@ export class Scraper implements Searcher {
         }
       }
     }
-    if (this.downReason && !verdict && !error) error = `scraper is down: ${this.downReason}`;
+    const down = this.down(token);
+    if (down && !verdict && !error) error = `scraper is down: ${down}; retry after ${this.retryIn()} s`;
     return buildRecord(params, started, {
       url: null,
       verdict,
@@ -302,7 +380,17 @@ export class Scraper implements Searcher {
       // The gap is time since the last page, not a wait added to it.
       const [lo, hi] = this.gapMs;
       const rest = lo + Math.random() * (hi - lo) - (performance.now() - slot.lastPageAt);
-      if (rest > 0) await sleep(rest, undefined, { signal });
+      if (rest > 0) await sleep(rest, signal);
+    }
+    if (this.pace) {
+      // One pace across identities: each results request takes the next start time free, jittered up to +30%.
+      const now = performance.now();
+      const at = Math.max(now, this.paceStart + this.pace * (1 + Math.random() * 0.3));
+      this.paceStart = at;
+      if (at > now) {
+        await sleep(at - now, signal);
+        ms.pace = (ms.pace ?? 0) + performance.now() - now;
+      }
     }
     try {
       return await identity.fetch(url, signal, ms);
@@ -401,7 +489,7 @@ export class Scraper implements Searcher {
       const [lo, hi] = this.opts.settleMs ?? SETTLE_MS;
       const settle = lo + Math.random() * (hi - lo);
       console.error(`browser restart on ${identity.session} after ${pages} pages (BROWSER_MAX_PAGES): ${seconds(t0)}s, settling ${(settle / 1000).toFixed(1)}s`);
-      await sleep(settle, undefined, { signal: this.closing.signal });
+      await sleep(settle, this.closing.signal);
     } catch (err) {
       if (this.closing.signal.aborted) return;
       this.lastError = message(err);
@@ -410,17 +498,32 @@ export class Scraper implements Searcher {
     }
   }
 
-  /** Exits refused or unreachable in a row; a served page anywhere resets the count. */
+  /**
+   * Exits refused or unreachable in a row; a served page anywhere resets the count. The count stays
+   * up while down, so after the cooldown the first failure trips the breaker again.
+   */
   private failed(): void {
     if (++this.refusedInRow >= BREAKER && !this.downReason) {
-      this.downReason = `${this.refusedInRow} exits in a row were refused or unreachable${this.lastError ? ` (last: ${this.lastError})` : ""}; check the proxy and restart`;
-      console.error(`scraper down: ${this.downReason}`);
+      const cooldown = this.cooldownMs;
+      this.cooldownMs = Math.max(cooldown, Math.min(cooldown * 2, BREAKER_COOLDOWN_MAX_MS));
+      this.downUntil = performance.now() + cooldown;
+      this.downReason = `${this.refusedInRow} exits in a row were refused or unreachable${this.lastError ? ` (last: ${this.lastError})` : ""}`;
+      console.error(`scraper down for ${Math.round(cooldown / 1000)}s: ${this.downReason}`);
       this.notify();
     }
   }
 
+  /** The global pace, kept between `paceMs` and `PACE_MAX_MS`. */
+  private setPace(ms: number, why: string): void {
+    const base = this.opts.paceMs ?? 0;
+    const pace = Math.max(base, Math.min(ms, PACE_MAX_MS));
+    if (Math.round(pace) !== Math.round(this.pace)) console.error(`pace ${(pace / 1000).toFixed(1)}s after ${why}`);
+    this.pace = pace;
+  }
+
   private warm(slot: Slot, why?: string): void {
     const t0 = performance.now();
+    slot.warming = true;
     const job = (async () => {
       while (!this.downReason && !this.closing.signal.aborted) {
         try {
@@ -437,6 +540,7 @@ export class Scraper implements Searcher {
         }
       }
     })().finally(() => {
+      slot.warming = false;
       this.warming.delete(job);
       this.notify();
     });
@@ -453,6 +557,8 @@ const scraperEnv = z.object({
   LINK_PARALLEL: z.coerce.number().int().min(1).default(PARALLEL),
   LINK_BUDGET_MS: z.coerce.number().int().min(1).default(LINK_BUDGET_MS),
   SPARE_IDENTITIES: z.coerce.number().int().min(0).default(1),
+  BREAKER_COOLDOWN_S: z.coerce.number().int().min(1).max(BREAKER_COOLDOWN_MAX_MS / 1000).default(BREAKER_COOLDOWN_MS / 1000),
+  PACE_MS: z.coerce.number().int().min(0).max(PACE_MAX_MS).default(PACE_MS),
 });
 
 /** The real scraper from the environment; throws with a readable message on a bad setting. */
@@ -470,7 +576,9 @@ export function createScraper(env: NodeJS.ProcessEnv = process.env): { scraper: 
     linkParallel: cfg.LINK_PARALLEL,
     linkBudgetMs: cfg.LINK_BUDGET_MS,
     spares: cfg.SPARE_IDENTITIES,
+    breakerCooldownMs: cfg.BREAKER_COOLDOWN_S * 1000,
+    paceMs: cfg.PACE_MS,
     makeIdentity: (signal) => openIdentity(proxy, { dwellS: cfg.WARMUP_DWELL_S }, signal),
   });
-  return { scraper, describe: `proxy ${proxy.describe()}, pool ${cfg.POOL_SIZE}, spares ${cfg.SPARE_IDENTITIES}` };
+  return { scraper, describe: `proxy ${proxy.describe()}, pool ${cfg.POOL_SIZE}, spares ${cfg.SPARE_IDENTITIES}, pace ${cfg.PACE_MS}ms` };
 }

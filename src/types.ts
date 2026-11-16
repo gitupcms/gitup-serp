@@ -35,6 +35,8 @@ export interface Timings {
   links_held?: number;
   links_lookups?: number;
   exits?: number;
+  /** Waiting for the global pace between results requests; only when it held the query. */
+  pace?: number;
   /** Why each dropped exit was dropped: a refusal verdict, "poisoned" or "error". */
   retries?: string[];
   total: number;

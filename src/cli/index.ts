@@ -157,7 +157,7 @@ function errorRecord(params: SearchParams, error: string, seconds: number): Serp
 export function phases(t: Timings): string {
   const s = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
   const out: string[] = [];
-  for (const k of ["queue", "fetch", "browser"] as const) if (t[k] !== undefined) out.push(`${k} ${s(t[k])}`);
+  for (const k of ["queue", "pace", "fetch", "browser"] as const) if (t[k] !== undefined) out.push(`${k} ${s(t[k])}`);
   if (t.links !== undefined) out.push(`links ${s(t.links)} (held ${s(t.links_held ?? 0)}, ${t.links_lookups ?? 0} lookups)`);
   if (t.exits !== undefined) out.push(`exits ${t.exits}`);
   if (t.retries?.length) out.push(`retries ${t.retries.join(",")}`);
@@ -189,16 +189,44 @@ async function search(args: string[], deps: Deps): Promise<number> {
   const runtime = await deps.startRuntime();
   let failed = false;
 
+  /** The scraper's state when it is down but retries later (its breaker cooling down); else undefined. */
+  const cooling = () => {
+    const h = runtime.searcher.health();
+    return h.state === "down" && typeof h.retry_in === "number" ? { reason: String(h.reason), retryIn: h.retry_in } : undefined;
+  };
+  /** Wait `ms`, or less when the run is aborted. */
+  const pause = (ms: number) =>
+    new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        ac.signal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      ac.signal.addEventListener("abort", done, { once: true });
+    });
+
   const runQuery = async (q: string) => {
     for (let page = 1; page <= opts.pages && !ac.signal.aborted; page++) {
       const params: SearchParams = { q, page, hl: opts.hl, gl: opts.gl, location: opts.location, links: opts.links, links_wait: opts.links_wait };
-      const start = performance.now();
+      let start = performance.now();
       let record: SerpRecord;
-      try {
-        record = await runtime.searcher.search(params, ac.signal);
-      } catch (err) {
-        if (ac.signal.aborted) return;
-        record = errorRecord(params, err instanceof Error ? `${err.name}: ${err.message}` : String(err), 0);
+      // A long run outlives the breaker: wait out its cooldown, and ask again a page it refused unasked.
+      for (let tries = 0; ; tries++) {
+        const down = cooling();
+        if (down && (down.retryIn > 0 || tries > 0)) {
+          if (down.retryIn > 0) deps.stderr(`scraper down (${down.reason}): waiting ${down.retryIn}s\n`);
+          await pause(Math.max(1, down.retryIn) * 1000);
+          if (ac.signal.aborted) return;
+          start = performance.now();
+        }
+        try {
+          record = await runtime.searcher.search(params, ac.signal);
+        } catch (err) {
+          if (ac.signal.aborted) return;
+          record = errorRecord(params, err instanceof Error ? `${err.name}: ${err.message}` : String(err), 0);
+        }
+        if (!(record.error?.startsWith("scraper is down") && cooling())) break;
       }
       const seconds = ((performance.now() - start) / 1000).toFixed(1);
       const organic = Array.isArray(record.organic_results) ? record.organic_results.length : 0;

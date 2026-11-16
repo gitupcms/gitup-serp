@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import { gzipSync } from "node:zlib";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BrowserSide, CURL_BIN, CurlHttp, type Fetched, foldCookies, type Headers, Hybrid, type HttpSide, parseCurlOutput, type PhaseMs, replayHeaders } from "../src/scraper/hybrid.js";
 import type { Identity } from "../src/scraper/identity.js";
 import { createScraper, resultsUrl, Scraper, uule } from "../src/scraper/index.js";
 import { ProxyTemplate, redact } from "../src/scraper/proxy.js";
-import type { SearchParams } from "../src/types.js";
+import type { SearchParams, VerdictKind } from "../src/types.js";
 import { GOTO_B, NO_JS_PAGE, resultsPage, SORRY_PAGE } from "./fixtures/pages.js";
 
 // -- fake Google ---------------------------------------------------------------
@@ -554,6 +554,132 @@ describe("spare identities", () => {
   it("refuses a bad SPARE_IDENTITIES at startup", () => {
     for (const v of ["-1", "1.5", "one"]) {
       expect(() => createScraper({ SCRAPER_PROXY: "http://gate.example:8080", SPARE_IDENTITIES: v }), v).toThrow(/^invalid config: SPARE_IDENTITIES: /);
+    }
+  });
+});
+
+describe("breaker recovery and pace (fake time)", () => {
+  /** Identities that answer `verdict()` at once, with no HTTP; `starts` gets each request's time. */
+  function scripted(verdict: () => VerdictKind) {
+    const starts: number[] = [];
+    let n = 0;
+    const makeIdentity = async (): Promise<Identity> => ({
+      session: `s${n++}`,
+      proxyHost: null,
+      fetch: async (url: string) => {
+        starts.push(performance.now());
+        const kind = verdict();
+        return { fetched: { url, status: kind === "serp" ? 200 : 429, html: kind === "serp" ? resultsPage() : SORRY_PAGE }, verdict: { kind, reason: kind }, via: "http" };
+      },
+      close: async () => {},
+    });
+    return { makeIdentity, starts };
+  }
+  /** Await `p`, moving the fake clock while it waits on timers. */
+  async function settle<T>(p: Promise<T>): Promise<T> {
+    let done = false;
+    p.then(
+      () => (done = true),
+      () => (done = true),
+    );
+    while (!done) await vi.advanceTimersByTimeAsync(100);
+    return p;
+  }
+  const h = (s: Scraper) => s.health() as { state: string; retry_in?: number; pace: number };
+  let log: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    vi.spyOn(Math, "random").mockReturnValue(0); // no jitter
+    log = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("trips, fails fast with a retry time while down, then recovers after the cooldown", async () => {
+    let kind: VerdictKind = "sorry";
+    const f = scripted(() => kind);
+    const s = new Scraper({ poolSize: 1, makeIdentity: f.makeIdentity, gapMs: [0, 0], breakerCooldownMs: 10_000 });
+    await s.search(params("a"));
+    await s.search(params("b"));
+    expect(h(s)).toMatchObject({ state: "down", retry_in: 10 });
+    const asked = f.starts.length;
+    const r = await s.search(params("c"));
+    expect(r.error).toMatch(/^scraper is down: 6 exits in a row .*; retry after 10 s$/);
+    expect(f.starts).toHaveLength(asked); // no request while down
+    kind = "serp";
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(h(s)).toMatchObject({ state: "down", retry_in: 1 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await s.search(params("d"))).search_metadata.status).toBe("Success");
+    expect(h(s).state).toBe("ok");
+    await s.close();
+  });
+
+  it("lets one query through when half-open; a refused try doubles the cooldown, a served page resets it", async () => {
+    let kind: VerdictKind = "sorry";
+    const f = scripted(() => kind);
+    const s = new Scraper({ poolSize: 1, makeIdentity: f.makeIdentity, gapMs: [0, 0], breakerCooldownMs: 10_000 });
+    await s.search(params("a"));
+    await s.search(params("b"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    const asked = f.starts.length;
+    const [probe, other] = await Promise.all([s.search(params("c")), s.search(params("d"))]);
+    expect(f.starts.length - asked).toBe(1); // the try stops at its first refusal
+    expect(probe.search_metadata.page_verdict).toBe("sorry");
+    expect(other.error).toMatch(/scraper is down/);
+    expect(h(s)).toMatchObject({ state: "down", retry_in: 20 });
+    kind = "serp";
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect((await s.search(params("e"))).error).toMatch(/retry after 1 s/);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await s.search(params("f"))).search_metadata.status).toBe("Success");
+    kind = "sorry";
+    await s.search(params("g"));
+    await s.search(params("h"));
+    expect(h(s)).toMatchObject({ state: "down", retry_in: 10 }); // back to the base cooldown
+    await s.close();
+  });
+
+  it("grows the pace on refusals and shrinks it after 20 served pages, never under PACE_MS", async () => {
+    const kinds: VerdictKind[] = ["sorry", "sorry"];
+    const f = scripted(() => kinds.shift() ?? "serp");
+    const s = new Scraper({ poolSize: 1, makeIdentity: f.makeIdentity, gapMs: [0, 0], paceMs: 1_000 });
+    const first = await settle(s.search(params()));
+    expect(first.search_metadata.status).toBe("Success");
+    expect(h(s).pace).toBe(2_250); // 1000 x 1.5 x 1.5
+    // The exits after each refusal waited 1500 and 2250 ms for the pace.
+    expect(first.search_metadata.timings?.pace).toBe(3_750);
+    expect(log.mock.calls.map((c: unknown[]) => String(c[0]))).toContain("pace 2.3s after sorry");
+    for (let i = 1; i < 20; i++) await settle(s.search(params()));
+    expect(h(s).pace).toBe(2_025);
+    for (let i = 0; i < 200; i++) await settle(s.search(params()));
+    expect(h(s).pace).toBe(1_000);
+    await s.close();
+  });
+
+  it("caps the pace at 60 s", async () => {
+    const f = scripted(() => "sorry");
+    const s = new Scraper({ poolSize: 1, makeIdentity: f.makeIdentity, gapMs: [0, 0], paceMs: 30_000 });
+    await settle(s.search(params("a")));
+    expect(h(s).pace).toBe(60_000);
+    await s.close();
+  });
+
+  it("keeps the global gap between concurrent queries on different identities", async () => {
+    const f = scripted(() => "serp");
+    const s = new Scraper({ poolSize: 3, makeIdentity: f.makeIdentity, gapMs: [0, 0], paceMs: 500 });
+    await settle(Promise.all(["a", "b", "c", "d", "e"].map((q) => s.search(params(q)))));
+    const gaps = f.starts.slice(1).map((t, i) => t - f.starts[i]!);
+    expect(gaps).toEqual([500, 500, 500, 500]);
+    await s.close();
+  });
+
+  it("reads BREAKER_COOLDOWN_S and PACE_MS, refusing bad values", () => {
+    const env = { SCRAPER_PROXY: "http://gate.example:8080" };
+    for (const [k, v] of [["BREAKER_COOLDOWN_S", "0"], ["BREAKER_COOLDOWN_S", "5000"], ["PACE_MS", "-1"], ["PACE_MS", "60001"]]) {
+      expect(() => createScraper({ ...env, [k!]: v }), `${k}=${v}`).toThrow(new RegExp(`^invalid config: ${k}: `));
     }
   });
 });

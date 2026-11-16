@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type Deps, main, parseSearchArgs, phases, UsageError } from "../src/cli/index.js";
 import { answered, openWriter } from "../src/cli/output.js";
 import type { SearchParams, SerpRecord } from "../src/types.js";
@@ -218,6 +218,64 @@ describe("main", () => {
     const got = JSON.parse(t.out());
     expect(got.length).toBeGreaterThan(0);
     expect(got.length).toBeLessThan(100);
+  });
+
+  it("waits out the scraper's cooldown instead of failing, and asks again a page refused while down", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      let downUntil = 0; // fake-clock ms; the scraper is down before it
+      const calls: string[] = [];
+      let out = "";
+      let err = "";
+      const health = () =>
+        performance.now() < downUntil
+          ? { state: "down" as const, reason: "6 exits refused", retry_in: Math.ceil((downUntil - performance.now()) / 1000) }
+          : { state: "ok" as const };
+      const deps: Deps = {
+        env: {},
+        stdout: (s) => (out += s),
+        stderr: (s) => (err += s),
+        startRuntime: async () => ({
+          live: true,
+          close: async () => {},
+          searcher: {
+            health,
+            async search(p) {
+              calls.push(p.q);
+              await new Promise((r) => setTimeout(r, 10)); // both workers are mid-request when "trip" trips
+              if (performance.now() < downUntil) return rec(p.q, 1, false, false, { error: "scraper is down: 6 exits refused; retry after 1 s" });
+              if (p.q === "trip") downUntil = performance.now() + 30_000; // this page trips the breaker, the next one finds it down
+              return rec(p.q);
+            },
+          },
+        }),
+      };
+      // Two workers: "b" runs beside "trip" and is refused unasked; "c" comes after and waits first.
+      const run = main(["search", "trip", "b", "c"], { ...deps, env: { POOL_SIZE: "2" } });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(calls).toEqual(["trip", "b"]);
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(await run).toBe(0);
+      expect(calls.sort()).toEqual(["b", "b", "c", "trip"]);
+      const records = out.trim().split("\n").map((l) => JSON.parse(l));
+      expect(records.map((r) => `${r.search_parameters.q} ${r.search_metadata.status}`).sort()).toEqual(["b Success", "c Success", "trip Success"]);
+      expect(err.match(/scraper down \(6 exits refused\): waiting 30s\n/g)).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails at once when the scraper is down for good (no retry_in)", async () => {
+    const t = fakeDeps();
+    const deps: Deps = {
+      ...t.deps,
+      startRuntime: async () => ({
+        live: true,
+        close: async () => {},
+        searcher: { health: () => ({ state: "down" as const, reason: "not wired" }), search: async (p) => rec(p.q, 1, false, false, { error: "scraper is down: not wired" }) },
+      }),
+    };
+    expect(await main(["search", "a"], deps)).toBe(1);
   });
 
   it("usage errors exit 2", async () => {
