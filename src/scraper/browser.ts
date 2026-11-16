@@ -30,10 +30,13 @@ const INTERRUPTED_BY = "is interrupted by another navigation to";
 
 export class Browser implements BrowserSide {
   headers: Headers | null = null;
+  /** Results pages loaded since this browser (re)started. */
+  pages = 0;
 
   private constructor(
-    private readonly context: BrowserContext,
-    private readonly page: Page,
+    private readonly launch: () => Promise<BrowserContext>,
+    private context: BrowserContext,
+    private page: Page,
     private readonly profile: string,
     private readonly origin: string,
   ) {}
@@ -43,14 +46,16 @@ export class Browser implements BrowserSide {
     process.env.PLAYWRIGHT_BROWSERS_PATH ??= BROWSERS_DIR;
     const { chromium } = await import("patchright");
     const profile = await mkdtemp(join(tmpdir(), "openserp-profile-"));
-    try {
-      const context = await chromium.launchPersistentContext(profile, {
+    const launch = () =>
+      chromium.launchPersistentContext(profile, {
         headless: false,
         viewport: null,
         ...(proxy && { proxy: { server: proxy.server, username: proxy.username, password: proxy.password } }),
       });
+    try {
+      const context = await launch();
       const page = context.pages()[0] ?? (await context.newPage());
-      return new Browser(context, page, profile, origin);
+      return new Browser(launch, context, page, profile, origin);
     } catch (err) {
       await rm(profile, { recursive: true, force: true });
       throw err;
@@ -82,6 +87,7 @@ export class Browser implements BrowserSide {
   }
 
   async search(url: string): Promise<Fetched> {
+    this.pages++;
     let response = await this.gotoResults(url);
     // A fresh exit can be shown the consent wall instead of results; clear it and open them again.
     if (await this.dismissConsent()) response = await this.gotoResults(url);
@@ -121,6 +127,20 @@ export class Browser implements BrowserSide {
   /** Leave the current page, stopping whatever it is still loading. */
   async blank(): Promise<void> {
     await this.page.goto("about:blank").catch(() => {});
+  }
+
+  /**
+   * Close the browser and open it again on the same profile and proxy: Chromium's renderer grows
+   * with every page and only a new browser gives the memory back. Captured headers stay.
+   */
+  async restart(): Promise<void> {
+    // Session cookies are not written to the profile, so the whole jar is carried over by hand.
+    const jar = await this.context.cookies();
+    await this.context.close().catch(() => {});
+    this.context = await this.launch();
+    this.page = this.context.pages()[0] ?? (await this.context.newPage());
+    if (jar.length) await this.context.addCookies(jar.map(({ partitionKey: _, ...c }) => c));
+    this.pages = 0;
   }
 
   async close(): Promise<void> {

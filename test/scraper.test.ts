@@ -113,7 +113,7 @@ const params = (q = "swimming", page = 1): SearchParams => ({ q, page, hl: "en" 
 
 /** Identities whose exits are taken from `exits` in order; the last one repeats. */
 function pool(exits: string[]) {
-  const made: { id: Identity; closed: boolean; browser: FakeBrowser }[] = [];
+  const made: { id: Identity; closed: boolean; browser: FakeBrowser; restarts: number }[] = [];
   let n = 0;
   const makeIdentity = async () => {
     const exit = exits[Math.min(n, exits.length - 1)]!;
@@ -122,7 +122,21 @@ function pool(exits: string[]) {
     const entry = {
       closed: false,
       browser,
-      id: { session: `${exit}-${n++}`, proxyHost: "gate.example:8080", fetch: (u: string, s?: AbortSignal) => hybrid.fetch(u, s), lookup: (u: string, s?: AbortSignal) => hybrid.lookup(u, s), close: async () => void (entry.closed = true) },
+      restarts: 0,
+      id: {
+        session: `${exit}-${n++}`,
+        proxyHost: "gate.example:8080",
+        fetch: (u: string, s?: AbortSignal) => hybrid.fetch(u, s),
+        lookup: (u: string, s?: AbortSignal) => hybrid.lookup(u, s),
+        close: async () => void (entry.closed = true),
+        get browserPages() {
+          return browser.searches;
+        },
+        restart: async () => {
+          browser.searches = 0;
+          entry.restarts++;
+        },
+      },
     };
     made.push(entry);
     return entry.id;
@@ -346,6 +360,56 @@ describe("Scraper", () => {
     }
   });
 
+  it("restarts the browser between queries after BROWSER_MAX_PAGES browser pages, keeping the exit", async () => {
+    fake.httpCheck = true; // every query runs on the browser
+    const p = pool(["good"]);
+    const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0], browserMaxPages: 2, settleMs: [0, 0] });
+    for (const q of ["a", "b", "c"]) expect((await s.search(params(q))).search_metadata.status).toBe("Success");
+    expect(p.made).toHaveLength(1);
+    expect(p.made[0]).toMatchObject({ restarts: 1, closed: false });
+    await s.close();
+    const never = pool(["good"]);
+    const s0 = new Scraper({ poolSize: 1, makeIdentity: never.makeIdentity, origin: base, gapMs: [0, 0], browserMaxPages: 0, settleMs: [0, 0] });
+    for (const q of ["a", "b", "c"]) await s0.search(params(q));
+    expect(never.made[0]!.restarts).toBe(0);
+    await s0.close();
+  });
+
+  it("takes a new exit after EXIT_MAX_QUERIES queries without tripping the breaker", async () => {
+    const p = pool(["one", "two"]);
+    const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0], exitMaxQueries: 2 });
+    const sessions: unknown[] = [];
+    for (const q of ["a", "b", "c"]) sessions.push((await s.search(params(q))).exit?.session);
+    expect(sessions).toEqual(["one-0", "one-0", "two-1"]);
+    expect(p.made[0]!.closed).toBe(true);
+    expect(s.health().state).toBe("ok");
+    await s.close();
+  });
+
+  it("drops an exit whose pages keep answering other queries", async () => {
+    const p = pool(["poisoned", "fresh"]);
+    const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0] });
+    // The fixture's titles are about swimming: unrelated to these queries.
+    const first = await s.search(params("cheap flights rome"));
+    expect(first.search_metadata.status).toBe("Success"); // one odd page is not enough
+    await s.search(params("pizza delivery downtown"));
+    const third = await s.search(params("mortgage rates today"));
+    expect(p.made[0]!.closed).toBe(true);
+    expect(third.exit).toMatchObject({ session: "fresh-1" });
+    await s.close();
+  });
+
+  it("never drops an exit for related, short or non-Latin queries", async () => {
+    const p = pool(["good"]);
+    const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0] });
+    for (const q of ["swimming for beginners", "swimming", "水泳 初心者 練習", "yüzme dersi fiyatları", '"swim lessons" cheap', "beginner swimming guide", "水泳"]) {
+      expect((await s.search(params(q))).search_metadata.status, q).toBe("Success");
+    }
+    expect(p.made).toHaveLength(1);
+    expect(p.made[0]!.closed).toBe(false);
+    await s.close();
+  });
+
   it("reports warming until an identity is ready", async () => {
     let finish!: () => void;
     const gate = new Promise<void>((r) => (finish = r));
@@ -373,6 +437,11 @@ describe.skipIf(!process.env.RUN_BROWSER_TESTS)("real browser (RUN_BROWSER_TESTS
       const served = await b.search(`${base}/search?q=x`);
       expect(served.html).toContain('id="rso"');
       expect(await b.cookies()).toMatch(/ok=1.*NID=|NID=.*ok=1/);
+      // A restart keeps the jar, session cookies included, and the captured headers.
+      await b.restart();
+      expect(await b.cookies()).toMatch(/ok=1.*NID=|NID=.*ok=1/);
+      expect(b.headers).not.toBeNull();
+      expect((await b.search(`${base}/search?q=x`)).html).toContain('id="rso"');
     } finally {
       await b.close();
     }

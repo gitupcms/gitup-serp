@@ -13,6 +13,9 @@ const base: Config = {
   MAX_QUEUE: 1,
   REQUEST_TIMEOUT_MS: 1000,
   RATE_PER_MIN: 1000,
+  DEFAULT_HL: "en",
+  DEFAULT_GL: "us",
+  TRUST_PROXY: false,
 };
 const auth = { Authorization: `Bearer ${KEY}` };
 
@@ -78,6 +81,7 @@ describe("validation", () => {
     ["/search.json?q=a&pages=4", "pages must be between 1 and 3"],
     ["/search.json?q=a&pages=x", "pages must be an integer"],
     ["/search.json?q=a&gl=usa", "gl must be a two-letter country code such as us"],
+    ["/search.json?q=a&hl=english", "hl must be a language code such as en or pt-BR"],
   ])("%s -> 400", async (url, error) => {
     const res = await make().request(url, { headers: auth });
     expect(res.status).toBe(400);
@@ -92,12 +96,43 @@ describe("pages", () => {
     expect(Array.isArray(body)).toBe(false);
     expect(body.search_parameters).toMatchObject({ q: "a", hl: "en", gl: "us", page: 1 });
   });
-  it("returns an array for more pages, all under one id", async () => {
+  it("returns an array for more pages, each page under its own id", async () => {
     const fake = new Fake();
-    const body = await (await make(fake).request("/search.json?q=a&pages=2", { headers: auth })).json();
+    const app = make(fake);
+    const body = await (await app.request("/search.json?q=a&pages=2", { headers: auth })).json();
     expect(body).toHaveLength(2);
     expect(fake.calls.map((c) => c.page)).toEqual([1, 2]);
-    expect(body[0].search_metadata.id).toBe(body[1].search_metadata.id);
+    const [a, b] = body.map((r: SerpRecord) => r.search_metadata.id);
+    expect(a).not.toBe(b);
+    for (const [i, id] of [a, b].entries()) {
+      const one = await (await app.request(`/searches/${id}.json`, { headers: auth })).json();
+      expect(one.search_parameters.page).toBe(i + 1);
+    }
+  });
+  it("keeps the combined pages under the async request id", async () => {
+    const app = make(new Fake());
+    const first = await (await app.request("/search.json?q=a&pages=2&async=true", { headers: auth })).json();
+    const id = first.search_metadata.id as string;
+    await new Promise((r) => setTimeout(r, 20));
+    const all = await (await app.request(`/searches/${id}.json`, { headers: auth })).json();
+    expect(all).toHaveLength(2);
+    expect(all.map((r: SerpRecord) => r.search_metadata.id)).not.toContain(id);
+  });
+});
+
+describe("default gl/hl", () => {
+  it("fills in DEFAULT_GL and DEFAULT_HL", async () => {
+    const fake = new Fake();
+    await make(fake, { DEFAULT_GL: "de", DEFAULT_HL: "de" }).request("/search.json?q=a", { headers: auth });
+    expect(fake.calls[0]).toMatchObject({ gl: "de", hl: "de" });
+  });
+  it("lets the caller override them, and sends no gl when DEFAULT_GL is off", async () => {
+    const fake = new Fake();
+    const app = make(fake, { DEFAULT_GL: undefined });
+    await app.request("/search.json?q=a&gl=fr&hl=fr", { headers: auth });
+    await app.request("/search.json?q=a", { headers: auth });
+    expect(fake.calls[0]).toMatchObject({ gl: "fr", hl: "fr" });
+    expect(fake.calls[1]!.gl).toBeUndefined();
   });
 });
 
@@ -145,6 +180,18 @@ describe("rate limit", () => {
     const res = await app.request("/search.json?q=a", { headers: auth });
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBeTruthy();
+  });
+  const xff = (ip: string) => ({ headers: { ...auth, "X-Forwarded-For": `${ip}, 10.0.0.1` } });
+  it("keys on the first X-Forwarded-For address with TRUST_PROXY", async () => {
+    const app = make(new Fake(), { RATE_PER_MIN: 1, TRUST_PROXY: true });
+    expect((await app.request("/search.json?q=a", xff("1.1.1.1"))).status).toBe(200);
+    expect((await app.request("/search.json?q=a", xff("2.2.2.2"))).status).toBe(200);
+    expect((await app.request("/search.json?q=a", xff("1.1.1.1"))).status).toBe(429);
+  });
+  it("ignores X-Forwarded-For without TRUST_PROXY", async () => {
+    const app = make(new Fake(), { RATE_PER_MIN: 1 });
+    expect((await app.request("/search.json?q=a", xff("1.1.1.1"))).status).toBe(200);
+    expect((await app.request("/search.json?q=a", xff("2.2.2.2"))).status).toBe(429);
   });
 });
 

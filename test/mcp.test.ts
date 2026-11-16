@@ -118,6 +118,14 @@ describe("mcp handler", () => {
     expect(unknown.error.code).toBe(-32602);
   });
 
+  it("fills in the given hl/gl defaults when the call has none", async () => {
+    const fake = new Fake((p) => record(p, {}));
+    await createMcpHandler(async () => fake, { hl: "de" })(callTool({ query: "x" }));
+    await createMcpHandler(async () => fake)(callTool({ query: "x", hl: "fr" }));
+    expect(fake.calls[0]).toMatchObject({ hl: "de", gl: undefined });
+    expect(fake.calls[1]).toMatchObject({ hl: "fr", gl: "us" });
+  });
+
   it("answers unknown methods with -32601 and ignores notifications", async () => {
     const h = createMcpHandler(noSearcher);
     expect(((await h(rpc(7, "resources/list"))) as any).error).toMatchObject({ code: -32601 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classify, relevance, unrelated } from "../src/classify/index.js";
+import { classify, POISON_WINDOW, poisoned, relevance, unrelated } from "../src/classify/index.js";
 import type { VerdictKind } from "../src/types.js";
 import * as pages from "./fixtures/pages.js";
 
@@ -72,6 +72,41 @@ describe("unrelated", () => {
     expect(relevance("pubsub pricing", ["Google Pub/Sub pricing"])).toBe(1);
     expect(relevance("node.js streams", ["NodeJS streams explained"])).toBe(1);
     expect(relevance("кошки корм", ["Корм для кошки"])).toBe(1);
+  });
+
+  it("folds Turkish i and accents", () => {
+    expect(unrelated("istanbul hava durumu", ["İSTANBUL HAVA DURUMU", "İstanbul'da hava"])).toBe(false);
+    expect(unrelated("kırmızı elma faydaları", ["KIRMIZI ELMANIN FAYDALARI", "Kırmızı elma"])).toBe(false);
+    expect(unrelated("crème brûlée recipe", ["Creme brulee recipe"])).toBe(false);
+    expect(unrelated("istanbul hava durumu", ["Cheap flights to Rome", "Best pizza near me"])).toBe(true);
+  });
+
+  it("accepts the page when unsure: other scripts, quotes, operators, short queries", () => {
+    const off = ["Cheap flights to Rome", "Best pizza near me"];
+    for (const q of ["東京タワー 営業時間", "東京の天気", "서울 날씨 예보", "погода в москве завтра", "swimming", "how to swim", '"swimming lessons"', "site:reddit.com rust async", "rust -async tutorial"]) {
+      expect(unrelated(q, off), q).toBeNull();
+    }
+  });
+});
+
+describe("poisoned", () => {
+  const off = ["Cheap flights to Rome", "Best pizza near me"];
+  const on = ["Swimming lessons for beginners"];
+
+  it("needs three unrelated pages in the last five", () => {
+    const w: boolean[] = [];
+    expect(poisoned(w, "swimming lessons", off)).toBe(false);
+    expect(poisoned(w, "swimming lessons", on)).toBe(false);
+    expect(poisoned(w, "swimming lessons", off)).toBe(false);
+    expect(poisoned(w, "swimming lessons", on)).toBe(false);
+    expect(poisoned(w, "swimming lessons", off)).toBe(true);
+    expect(w.length).toBeLessThanOrEqual(POISON_WINDOW);
+  });
+
+  it("never counts a page it cannot judge", () => {
+    const w: boolean[] = [];
+    for (let i = 0; i < 10; i++) expect(poisoned(w, i % 2 ? "東京 天気" : "swimming", off)).toBe(false);
+    expect(w).toEqual([]);
   });
 });
 

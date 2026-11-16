@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { startRuntime, type Runtime } from "../bootstrap.js";
+import { glSchema, hlSchema, searchDefaults, type SearchDefaults } from "../config.js";
 import type { Searcher, SerpRecord } from "../types.js";
 
 export const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -54,11 +55,8 @@ const argsSchema = z.object({
     .min(1, `pages must be between 1 and ${MAX_PAGES}`)
     .max(MAX_PAGES, `pages must be between 1 and ${MAX_PAGES}`)
     .default(1),
-  hl: z
-    .string()
-    .regex(/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?$/, "hl must be a language code such as en or pt-BR")
-    .default("en"),
-  gl: z.string().regex(/^[A-Za-z]{2}$/, "gl must be a two-letter country code such as us").optional(),
+  hl: hlSchema.optional(),
+  gl: glSchema.optional(),
   links: z
     .number({ error: "links must be an integer" })
     .int("links must be an integer")
@@ -120,16 +118,16 @@ const toolError = (text: string) => ({ content: [{ type: "text", text }], isErro
  * One JSON-RPC message in, the reply out (undefined for notifications).
  * `getSearcher` is only called on the first `tools/call`, so `initialize` is instant.
  */
-export function createMcpHandler(getSearcher: () => Promise<Searcher>) {
+export function createMcpHandler(getSearcher: () => Promise<Searcher>, defaults: SearchDefaults = searchDefaults({})) {
   async function call(params: Obj) {
     if (params.name !== TOOL.name) throw new RpcError(-32602, `unknown tool: ${String(params.name)}`);
     const parsed = argsSchema.safeParse(params.arguments ?? {});
     if (!parsed.success) return toolError(parsed.error.issues[0]!.message);
-    const { query, pages, ...rest } = parsed.data;
+    const { query, pages, hl = defaults.hl, gl = defaults.gl, ...rest } = parsed.data;
     let records: SerpRecord[] = [];
     try {
       const searcher = await getSearcher();
-      for (let page = 1; page <= pages; page++) records.push(await searcher.search({ q: query, page, ...rest }));
+      for (let page = 1; page <= pages; page++) records.push(await searcher.search({ q: query, page, hl, gl, ...rest }));
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       if (!records.length) return toolError(`${e.name}: ${e.message}`);
@@ -191,7 +189,7 @@ export async function serve(): Promise<void> {
     });
     return (await runtime).searcher;
   };
-  const handle = createMcpHandler(getSearcher);
+  const handle = createMcpHandler(getSearcher, searchDefaults());
   const write = (m: Json) => process.stdout.write(`${JSON.stringify(m)}\n`);
   const pending = new Set<Promise<void>>();
 

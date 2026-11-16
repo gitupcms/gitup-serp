@@ -116,8 +116,18 @@ describe("parseSearchArgs", () => {
     [["--resume"]],
     [["--resume", "--output", "o.csv", "--format", "csv"]],
     [["--nope"]],
+    [["--hl", "english"]],
+    [["--gl", "usa"]],
   ])("refuses %j", (args) => {
     expect(() => parseSearchArgs(args)).toThrow(UsageError);
+  });
+
+  it("gives hl/gl errors the API's messages and DEFAULT_* fills them in", () => {
+    expect(() => parseSearchArgs(["q", "--gl", "usa"])).toThrow("gl must be a two-letter country code such as us");
+    expect(() => parseSearchArgs(["q", "--hl", "x"])).toThrow("hl must be a language code such as en or pt-BR");
+    expect(parseSearchArgs(["q"])).toMatchObject({ hl: "en", gl: "us" });
+    expect(parseSearchArgs(["q"], { DEFAULT_GL: "", DEFAULT_HL: "de" })).toMatchObject({ hl: "de", gl: undefined });
+    expect(() => parseSearchArgs(["q"], { DEFAULT_GL: "usa" })).toThrow(UsageError);
   });
 });
 
@@ -172,7 +182,7 @@ describe("main", () => {
   it("--resume asks only what the output lacks and appends", async () => {
     const f = join(tmp(), "o.jsonl");
     writeFileSync(f, lines([rec("a"), rec("b", 1, false)]));
-    const t = fakeDeps();
+    const t = fakeDeps({ env: { DEFAULT_GL: "" } }); // the records carry no gl
     expect(await main(["search", "a", "b", "--output", f, "--resume"], t.deps)).toBe(0);
     expect(t.calls.map((c) => c.q)).toEqual(["b"]);
     expect(readFileSync(f, "utf8").trim().split("\n")).toHaveLength(3);
@@ -204,6 +214,7 @@ describe("main", () => {
     expect(await main([], t.deps)).toBe(2);
     expect(await main(["search"], t.deps)).toBe(2);
     expect(await main(["search", "a", "--pages", "0"], t.deps)).toBe(2);
+    expect(await main(["search", "a", "--gl", "usa"], t.deps)).toBe(2);
     expect(t.err()).toContain("usage:");
   });
 

@@ -28,6 +28,10 @@ export interface Identity {
   /** A result-link lookup on the same HTTP client; without it links are left unresolved. */
   lookup?(url: string, signal?: AbortSignal): Promise<LinkAnswer>;
   close(): Promise<void>;
+  /** Results pages the browser loaded since it (re)started; with `restart`, BROWSER_MAX_PAGES applies. */
+  readonly browserPages?: number;
+  /** Reopen the browser on the same profile, exit and cookies. */
+  restart?(): Promise<void>;
 }
 
 export interface IdentityOptions {
@@ -57,6 +61,10 @@ export async function openIdentity(proxy: ProxyTemplate | null, opts: IdentityOp
       fetch: (url, s) => hybrid.fetch(url, s),
       lookup: (url, s) => hybrid.lookup(url, s),
       close: () => browser.close(),
+      get browserPages() {
+        return browser.pages;
+      },
+      restart: () => browser.restart(),
     };
   } catch (err) {
     await browser.close();

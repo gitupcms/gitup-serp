@@ -32,7 +32,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Yük testi: 50 sorgu (CLI, link çözme kapalı) **50/50 başarılı**, hiç engel yok. Ortanca süre 5,2 sn, p90 6,6 sn. İlk sorgu ısınmayla birlikte 46 sn sürdü.
 - [ ] Daha büyük yük testi: 500+ sorgu ve `POOL_SIZE` > 1.
 - [ ] Birden çok Cloudflare hesabı: kota ve IP çeşitliliği için.
-- [ ] Çıkış ülkesi seçimi: Cloudflare'de seçilemiyor. `gl` verilmeyen bir sorgu Japonca sonuç döndürdü; sonuçlar çıkış IP'sinin konumuna göre değişiyor. Yapılabilecekler: varsayılan `gl` ve `hl` vermek, ya da bir upstream SOCKS veya HTTP proxy'ye isteğe bağlı zincirleme.
+- [~] Çıkış ülkesi seçimi: Cloudflare'de seçilemiyor. Varsayılan `DEFAULT_GL=us` ve `DEFAULT_HL=en` eklendi (API, CLI ve MCP). Organik sonuçlar artık gl'ye uyuyor, ama yerel paket hâlâ çıkış IP'sinin şehrine göre geliyor ("pizza near me": organik sonuçlar Orlando'dan, yerel paket Londra'dan). Bunu çözmek için `location` (uule) ya da upstream proxy zinciri gerekiyor. `gl` verilmeyen bir sorgu Japonca sonuç döndürdü; sonuçlar çıkış IP'sinin konumuna göre değişiyor. Yapılabilecekler: varsayılan `gl` ve `hl` vermek, ya da bir upstream SOCKS veya HTTP proxy'ye isteğe bağlı zincirleme.
 
 ## 2. Tarayıcı, kimlik ve hibrit akış
 - [+] patchright, görünür pencere (headful), kalıcı profil. Proxy doğrudan tarayıcıya veriliyor; serpmaven'deki gibi kimlik doğrulamasız yerel relay yok.
@@ -44,10 +44,10 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] `AbortSignal` destekleniyor, temizlik ve kapanış düzgün yapılıyor.
 - [~] Consent seçicileri ve ısınma turu canlıda çalıştı, ancak başka diller ve ülkeler denenmedi.
 - [ ] `POOL_SIZE` > 1 canlıda denenecek. serpmaven'deki `--workers` (16'ya kadar) karşılığı.
-- [ ] Tarayıcıyı her 50 sayfada bir yeniden başlatma, ardından bekleme (serpmaven'de var).
-- [ ] Çıkış başına en fazla sorgu sayısı (serpmaven: 300).
+- [+] Tarayıcı her `BROWSER_MAX_PAGES` (varsayılan 50) sayfada aynı profil ve çerezlerle yeniden başlıyor, ardından 5-15 sn bekliyor. Restart sonrası çerezlerin korunduğu sahte Google'la denendi.
+- [+] Çıkış başına en fazla sorgu sayısı: `EXIT_MAX_QUERIES` (varsayılan 300).
 - [ ] İlk sorguyu arama kutusuna yazarak yapma (serpmaven `_query`). Gerekirse eklenecek; şu an URL ile açılıyor.
-- [ ] Alakasız ya da "zehirli" sayfa tespiti: `unrelated` fonksiyonu yazıldı ama akışa bağlanmadı.
+- [+] Alakasız ("zehirli") sayfa tespiti akışa bağlandı: bir çıkışın son 5 sayfasından 3'ü alakasızsa o çıkış bırakılıyor. Latin dışı alfabeler, tırnak ya da `site:` gibi operatörler içeren ve tek kelimelik sorgular hiç yargılanmıyor. Canlıda Türkçe, Japonca ve `site:` sorgularıyla 6/6 denendi, yanlış alarm çıkmadı.
 - [ ] HTTP tarafında silinen çerezlerin tarayıcıya da yansıtılması.
 - [ ] Header'ları NetLog'dan kaydetme: şu an CDP'den alınıyor, sıra bir miktar farklı olabilir.
 
@@ -59,10 +59,10 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Canlı: organik sonuçlar ve "People also ask" geliyor.
 - [+] Canlı: AI Overview 50 sorgunun 20'sinde doldu.
 - [~] Yabancı dillerdeki engel ve AI Overview metinleri tahmine dayalı, canlıda doğrulanmadı.
-- [ ] Reklamlar: 50 sorgunun hiçbirinde reklam gelmedi. Seçici hatası mı, yoksa bu IP'lere reklam gösterilmiyor mu, bilinmiyor.
-- [ ] Gerçek Google HTML örnekleri (`SAVE_HTML` ile) test fixture'ı olarak eklenecek.
+- [+] Reklamlar: seçicide hata yokmuş, sorun `gl` verilmemesiymiş. `gl=us` ile 8 ticari sorgunun 3'ünde 2'şer üst reklam geldi ve doğru ayrıştırıldı.
+- [+] Gerçek Google HTML örnekleri (`test/fixtures/*.html.gz`, `test/fixtures.test.ts`): reklam, yerel paket ve AI Overview içeren 3 sayfa.
 - [ ] Günlük canlı kontrol: Google HTML yapısını değiştirince haber verecek bir canary testi.
-- [ ] Yerel sonuçların ve reklamların canlıda kontrolü.
+- [+] Yerel sonuçların ve reklamların canlıda kontrolü (fixture'lara bakın).
 
 ## 4. Link çözme
 - [+] Sırasıyla sayfa içi liste, `ping` URL'si ve `/goto` deneniyor (`Location`). "Verifying" sayfası bekleme ve tekrar denemeyle aşılıyor.
@@ -78,8 +78,8 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] `GET /health` (kimlik doğrulamasız ve sorgusuz).
 - [+] Anahtar yalnızca `Authorization: Bearer` başlığıyla kabul ediliyor, sabit süreli karşılaştırma yapılıyor. `?api_key=` gönderilirse 400.
 - [+] Kuyruk dolunca 429, zaman aşımında 504. Hız sınırı uygulanıyor. Loglara sorgu yazılmıyor.
-- [ ] `X-Forwarded-For` desteği (reverse proxy arkasında hız sınırı doğru çalışsın diye), ayara bağlı.
-- [ ] Çok sayfalı isteklerde her sayfaya ayrı arşiv kimliği verilmesi.
+- [+] `X-Forwarded-For` desteği, `TRUST_PROXY` ayarıyla açılıyor.
+- [+] Çok sayfalı isteklerde her sayfaya ayrı arşiv kimliği veriliyor; birleşik sonuç istek kimliğinde duruyor.
 - [ ] OpenAPI ya da şema dokümanı.
 
 ## 6. CLI (serpmaven `search`)
@@ -89,7 +89,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] `doctor`: Node, curl-impersonate, Chromium, ekran ve egress kontrol ediliyor. Token değerleri gösterilmiyor.
 - [+] Canlı: 50 sorgu CLI ile çalıştı.
 - [+] `bin` girdisi (`gitup-serp`): `cli.mjs` sarmalayıcısı yereldeki tsx'i çalıştırıyor, PATH'te tsx gerekmiyor.
-- [ ] `--hl` ve `--gl` doğrulaması.
+- [+] `--hl` ve `--gl` doğrulaması (API ile aynı kurallar, hatalıysa çıkış kodu 2).
 - [-] `login` / `logout` (NodeMaven): kullanılmıyor, yerine `egress:*` komutları var.
 
 ## 7. MCP sunucusu

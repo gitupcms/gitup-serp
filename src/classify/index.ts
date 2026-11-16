@@ -79,6 +79,9 @@ export function classify(html: string, finalUrl: string, status?: number): Verdi
 
 /** Below this share of titles holding half of the query's words, a page is unrelated. */
 export const POISON_RELEVANCE = 0.2;
+/** An exit is poisoned when this many of its last POISON_WINDOW judged pages are unrelated. */
+export const POISON_HITS = 3;
+export const POISON_WINDOW = 5;
 export const MIN_WORDS = 2;
 const STOP_WORDS = new Set(
   "how to the a an of for and in on is what are best with do does you your my can i vs".split(" "),
@@ -89,6 +92,13 @@ const NOT_AFTER_WORD = "(?<![\\p{L}\\p{N}\\p{M}])";
 const JOINER = /(?<=[\p{L}\p{M}])[/.\-](?=[\p{L}\p{N}\p{M}])|(?<=\p{N})[/.\-](?=[\p{L}\p{M}])/gu;
 const JOINED = /[\p{L}\p{N}\p{M}]+(?:[/.\-][\p{L}\p{N}\p{M}]+)+/gu;
 
+/** Case and accents off, Turkish dotted and dotless i alike, so "İstanbul" finds "istanbul". */
+const fold = (s: string) => s.toLowerCase().normalize("NFKD").replace(/\p{M}/gu, "").replace(/ı/g, "i");
+/** A letter outside the Latin script: words there run together or change form, so matching misjudges. */
+const NON_LATIN = /(?!\p{Script=Latin})\p{L}/u;
+/** Quotes or search operators (site:, -word, +word): the titles need not hold the words as typed. */
+const OPERATOR = /["“”„«»]|(^|\s)[-+~]\S|[\p{L}\p{N}]:\S/u;
+
 /** Plural and verb endings off, so "puppies" finds "puppy" in a title. */
 function stem(word: string): string {
   for (const suffix of ["ies", "es", "s", "ing", "ed"]) {
@@ -98,7 +108,7 @@ function stem(word: string): string {
 }
 
 function words(query: string): string[] {
-  return (query.toLowerCase().match(WORD) ?? []).filter((w) => !STOP_WORDS.has(w) && w.length > 2).map(stem);
+  return (fold(query).match(WORD) ?? []).filter((w) => !STOP_WORDS.has(w) && w.length > 2).map(stem);
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -112,14 +122,14 @@ export function relevance(query: string, titles: string[]): number {
   const found = ws.map((w) => new RegExp(NOT_AFTER_WORD + escapeRe(w), "u"));
   // A joined query term ("pub/sub") is also looked for closed up ("pubsub").
   const joined: [RegExp, string[]][] = [];
-  for (const term of query.toLowerCase().match(JOINED) ?? []) {
+  for (const term of fold(query).match(JOINED) ?? []) {
     const parts = term.split(JOINER);
     if (parts.length > 1) {
       joined.push([new RegExp(NOT_AFTER_WORD + escapeRe(parts.map(stem).join("")), "u"), words(term)]);
     }
   }
   const hits = (title: string): number => {
-    const forms = [title.toLowerCase(), title.toLowerCase().replace(JOINER, "")];
+    const forms = [fold(title), fold(title).replace(JOINER, "")];
     const hit = found.map((f) => forms.some((form) => f.test(form)));
     for (const [pattern, parts] of joined) {
       if (!forms.some((form) => pattern.test(form))) continue;
@@ -133,8 +143,18 @@ export function relevance(query: string, titles: string[]): number {
   return titles.filter((t) => hits(t) >= need).length / titles.length;
 }
 
-/** Whether the titles are unrelated to the query; null when there is too little to tell. */
+/** Whether the titles are unrelated to the query; null when there is too little to tell or when unsure. */
 export function unrelated(query: string, titles: string[]): boolean | null {
+  if (NON_LATIN.test(query) || OPERATOR.test(query)) return null;
   if (words(query).length < MIN_WORDS || !titles.length) return null;
   return relevance(query, titles) < POISON_RELEVANCE;
+}
+
+/** Judge one served page into an exit's window of recent pages; true when the exit is poisoned. */
+export function poisoned(window: boolean[], query: string, titles: string[]): boolean {
+  const judged = unrelated(query, titles);
+  if (judged === null) return false;
+  window.push(judged);
+  if (window.length > POISON_WINDOW) window.shift();
+  return window.filter(Boolean).length >= POISON_HITS;
 }

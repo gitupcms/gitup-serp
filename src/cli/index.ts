@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import type { Runtime } from "../bootstrap.js";
+import { glSchema, hlSchema, searchDefaults } from "../config.js";
 import { readEgressState, STATE_FILE } from "../egress/state.js";
 import type { SearchParams, SerpRecord } from "../types.js";
 import { answered, FORMATS, type Format, openWriter, type Sink } from "./output.js";
@@ -53,7 +54,22 @@ function int(name: string, raw: string | undefined, min: number): number | undef
   return n;
 }
 
-export function parseSearchArgs(args: string[]): SearchOptions {
+/** `--hl`/`--gl` under the API's rules and messages, else the DEFAULT_HL/DEFAULT_GL env. */
+function locale(hl: string | undefined, gl: string | undefined, env: NodeJS.ProcessEnv): { hl: string; gl?: string } {
+  for (const [s, v] of [[hlSchema, hl], [glSchema, gl]] as const) {
+    const r = v === undefined ? undefined : s.safeParse(v);
+    if (r && !r.success) throw new UsageError(r.error.issues[0]!.message);
+  }
+  let d;
+  try {
+    d = searchDefaults(env);
+  } catch (err) {
+    throw new UsageError((err as Error).message);
+  }
+  return { hl: hl ?? d.hl, gl: gl ?? d.gl };
+}
+
+export function parseSearchArgs(args: string[], env: NodeJS.ProcessEnv = {}): SearchOptions {
   let parsed;
   try {
     parsed = parseArgs({
@@ -82,8 +98,7 @@ export function parseSearchArgs(args: string[]): SearchOptions {
     queries: parsed.positionals,
     input: v.input,
     pages: int("pages", v.pages, 1) ?? 1,
-    hl: v.hl ?? "en",
-    gl: v.gl,
+    ...locale(v.hl, v.gl, env),
     location: v.location,
     links: int("links", v.links, 0),
     format,
@@ -128,7 +143,7 @@ function errorRecord(params: SearchParams, error: string, seconds: number): Serp
 }
 
 async function search(args: string[], deps: Deps): Promise<number> {
-  const opts = parseSearchArgs(args);
+  const opts = parseSearchArgs(args, deps.env);
   let queries = await readQueries(opts, deps);
   if (opts.resume) {
     const done = answered(opts.output!, opts.pages, { hl: opts.hl, gl: opts.gl, location: opts.location });

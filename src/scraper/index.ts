@@ -6,6 +6,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
+import { poisoned } from "../classify/index.js";
 import { type Parsed, parseSerp } from "../parse/index.js";
 import type { SearchParams, Searcher, SerpRecord, Verdict, VerdictKind } from "../types.js";
 import { GOOGLE } from "./browser.js";
@@ -17,6 +18,12 @@ import { ProxyTemplate, redact } from "./proxy.js";
 export const MAX_EXITS = 3;
 export const BREAKER = 6;
 export const GAP_MS: [number, number] = [2_000, 5_000];
+/** Browser results pages before the browser restarts on the same profile (serpmaven: 50); 0 never. */
+export const BROWSER_MAX_PAGES = 50;
+/** Queries before an identity drops its exit for a new session (serpmaven: 300); 0 never. */
+export const EXIT_MAX_QUERIES = 300;
+/** The pause after a browser restart before the identity searches again. */
+export const SETTLE_MS: [number, number] = [5_000, 15_000];
 /** Google looked at this exit and refused it: drop the exit. */
 const REFUSED: VerdictKind[] = ["sorry", "wall", "block"];
 
@@ -25,6 +32,9 @@ export interface ScraperOptions {
   makeIdentity: (signal: AbortSignal) => Promise<Identity>;
   origin?: string;
   gapMs?: [number, number];
+  browserMaxPages?: number;
+  exitMaxQueries?: number;
+  settleMs?: [number, number];
 }
 
 interface Slot {
@@ -32,6 +42,8 @@ interface Slot {
   busy: boolean;
   queries: number;
   lastPageAt: number;
+  /** Whether each recent judged page was unrelated to its query (see classify `poisoned`). */
+  lowRelevance: boolean[];
 }
 
 const message = (err: unknown) => redact(err instanceof Error ? err.message : String(err));
@@ -107,6 +119,7 @@ export class Scraper implements Searcher {
   private readonly slots: Slot[];
   private readonly closing = new AbortController();
   private readonly warming = new Set<Promise<void>>();
+  private readonly upkeeps = new Set<Promise<void>>();
   private waiters = new Set<() => void>();
   private refusedInRow = 0;
   private downReason: string | null = null;
@@ -117,7 +130,7 @@ export class Scraper implements Searcher {
   constructor(private readonly opts: ScraperOptions) {
     this.origin = opts.origin ?? GOOGLE;
     this.gapMs = opts.gapMs ?? GAP_MS;
-    this.slots = Array.from({ length: opts.poolSize }, () => ({ identity: null, busy: false, queries: 0, lastPageAt: 0 }));
+    this.slots = Array.from({ length: opts.poolSize }, () => ({ identity: null, busy: false, queries: 0, lastPageAt: 0, lowRelevance: [] }));
     for (const slot of this.slots) this.warm(slot);
   }
 
@@ -151,39 +164,65 @@ export class Scraper implements Searcher {
         saveHtml(process.env.SAVE_HTML, params, answer.fetched.html);
         if (answer.verdict.kind !== "serp") return { answer };
         const parsed = parseSerp(answer.fetched.html, params.hl);
+        // Results for other queries: Google's answer to some automated traffic. Judged before lookups.
+        if (poisoned(slot.lowRelevance, params.q, parsed.organic_results.map((r) => r.title))) return { answer, parsed, poisoned: true };
         if (identity.lookup && params.links !== 0) {
           // Lookups never throw and a refusal there does not touch the exit rotation.
           const lookup = identity.lookup.bind(identity);
           await fillLinks(parsed.organic_results.slice(0, params.links), parsed.ping_paths, lookup, this.origin, signal);
         }
-        return { answer, parsed };
+        return { answer, parsed, poisoned: false };
       });
-      // The identity stays taken until its work really settles, even when the caller stopped waiting.
-      work.then(
-        () => this.release(slot),
-        () => this.release(slot),
+      // The identity stays taken until its work really settles, even when the caller stopped waiting,
+      // and, when it keeps its exit, until a browser restart is done too.
+      let settled = false;
+      const done = work.then(
+        () => void (settled = true),
+        () => void (settled = true),
       );
-      let answer: Answer;
-      let parsed: Parsed | undefined;
+      let keep = false;
       try {
-        ({ answer, parsed } = await abortable(work, signal));
-      } catch (err) {
-        if (signal?.aborted) throw err;
-        // A browser crash or a network error: this exit is no use, but it is not Google's answer.
-        [verdict, error] = [null, message(err)];
+        let answer: Answer;
+        let parsed: Parsed | undefined;
+        let poison: boolean | undefined;
+        try {
+          ({ answer, parsed, poisoned: poison } = await abortable(work, signal));
+        } catch (err) {
+          if (signal?.aborted) throw err;
+          // A browser crash or a network error: this exit is no use, but it is not Google's answer.
+          [verdict, error] = [null, message(err)];
+          this.retire(slot, identity);
+          continue;
+        }
+        if (poison) {
+          [verdict, error] = [null, "results unrelated to the query"];
+          this.retire(slot, identity);
+          continue;
+        }
+        if (answer.verdict.kind === "serp") {
+          this.refusedInRow = 0;
+          keep = true;
+          return buildRecord(params, started, { url: answer.fetched.url, verdict: answer.verdict, exit, parsed });
+        }
+        if (!REFUSED.includes(answer.verdict.kind)) {
+          // Not a refusal (unknown, consent, no_js, empty): keep the exit and say what was seen.
+          keep = true;
+          return buildRecord(params, started, { url: answer.fetched.url, verdict: answer.verdict, exit, error: `page not served: ${answer.verdict.reason}` });
+        }
+        [verdict, error] = [answer.verdict, ""];
         this.retire(slot, identity);
-        continue;
+      } finally {
+        const restart = settled && keep ? this.upkeep(slot, identity) : undefined;
+        if (!settled) done.then(() => this.release(slot));
+        else if (!restart) this.release(slot);
+        else {
+          const job = restart.finally(() => {
+            this.upkeeps.delete(job);
+            this.release(slot);
+          });
+          this.upkeeps.add(job);
+        }
       }
-      if (answer.verdict.kind === "serp") {
-        this.refusedInRow = 0;
-        return buildRecord(params, started, { url: answer.fetched.url, verdict: answer.verdict, exit, parsed });
-      }
-      if (!REFUSED.includes(answer.verdict.kind)) {
-        // Not a refusal (unknown, consent, no_js, empty): keep the exit and say what was seen.
-        return buildRecord(params, started, { url: answer.fetched.url, verdict: answer.verdict, exit, error: `page not served: ${answer.verdict.reason}` });
-      }
-      [verdict, error] = [answer.verdict, ""];
-      this.retire(slot, identity);
     }
     if (this.downReason && !verdict && !error) error = `scraper is down: ${this.downReason}`;
     return buildRecord(params, started, {
@@ -198,7 +237,7 @@ export class Scraper implements Searcher {
   async close(): Promise<void> {
     this.closing.abort(new Error("scraper closed"));
     this.notify();
-    await Promise.allSettled([...this.warming]);
+    await Promise.allSettled([...this.warming, ...this.upkeeps]);
     await Promise.allSettled(this.slots.map((s) => s.identity?.close()));
     for (const s of this.slots) s.identity = null;
   }
@@ -244,11 +283,38 @@ export class Scraper implements Searcher {
     for (const w of ws) w();
   }
 
-  private retire(slot: Slot, identity: Identity): void {
+  /** Drop an identity and warm a new one in its slot; `failed` counts it towards the breaker. */
+  private retire(slot: Slot, identity: Identity, failed = true): void {
     if (slot.identity === identity) slot.identity = null;
     identity.close().catch((err) => console.error(`closing identity ${identity.session}: ${message(err)}`));
-    this.failed();
+    if (failed) this.failed();
     this.warm(slot);
+  }
+
+  /**
+   * Between queries, on an identity that kept its exit: the per-exit query cap, then the browser
+   * restart. Returns the restart when one runs, so the slot stays taken until it is over.
+   */
+  private upkeep(slot: Slot, identity: Identity): Promise<void> | undefined {
+    if (slot.identity !== identity || this.closing.signal.aborted) return;
+    const maxQueries = this.opts.exitMaxQueries ?? EXIT_MAX_QUERIES;
+    if (maxQueries && slot.queries >= maxQueries) return void this.retire(slot, identity, false);
+    const maxPages = this.opts.browserMaxPages ?? BROWSER_MAX_PAGES;
+    if (!maxPages || !identity.restart || (identity.browserPages ?? 0) < maxPages) return;
+    return this.restart(slot, identity, identity.restart.bind(identity));
+  }
+
+  private async restart(slot: Slot, identity: Identity, restart: () => Promise<void>): Promise<void> {
+    try {
+      await restart();
+      const [lo, hi] = this.opts.settleMs ?? SETTLE_MS;
+      await sleep(lo + Math.random() * (hi - lo), undefined, { signal: this.closing.signal });
+    } catch (err) {
+      if (this.closing.signal.aborted) return;
+      this.lastError = message(err);
+      console.error(`browser restart failed: ${this.lastError}`);
+      this.retire(slot, identity);
+    }
   }
 
   /** Exits refused or unreachable in a row; a served page anywhere resets the count. */
@@ -266,7 +332,7 @@ export class Scraper implements Searcher {
         try {
           const identity = await this.opts.makeIdentity(this.closing.signal);
           if (this.closing.signal.aborted) return void (await identity.close());
-          Object.assign(slot, { identity, queries: 0, lastPageAt: 0 });
+          Object.assign(slot, { identity, queries: 0, lastPageAt: 0, lowRelevance: [] });
           return;
         } catch (err) {
           if (this.closing.signal.aborted) return;
@@ -287,6 +353,8 @@ const scraperEnv = z.object({
   SCRAPER_PROXY: z.string().min(1),
   POOL_SIZE: z.coerce.number().int().min(1).default(1),
   WARMUP_DWELL_S: z.coerce.number().min(0).default(DWELL_S),
+  BROWSER_MAX_PAGES: z.coerce.number().int().min(0).default(BROWSER_MAX_PAGES),
+  EXIT_MAX_QUERIES: z.coerce.number().int().min(0).default(EXIT_MAX_QUERIES),
 });
 
 /** The real scraper from the environment; throws with a readable message on a bad setting. */
@@ -299,6 +367,8 @@ export function createScraper(env: NodeJS.ProcessEnv = process.env): { scraper: 
   const proxy = new ProxyTemplate(cfg.SCRAPER_PROXY);
   const scraper = new Scraper({
     poolSize: cfg.POOL_SIZE,
+    browserMaxPages: cfg.BROWSER_MAX_PAGES,
+    exitMaxQueries: cfg.EXIT_MAX_QUERIES,
     makeIdentity: (signal) => openIdentity(proxy, { dwellS: cfg.WARMUP_DWELL_S }, signal),
   });
   return { scraper, describe: `proxy ${proxy.describe()}, pool ${cfg.POOL_SIZE}` };

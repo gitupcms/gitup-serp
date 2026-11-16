@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono, type Context } from "hono";
 import type { HttpBindings } from "@hono/node-server";
 import { z } from "zod";
-import type { Config } from "../config.js";
+import { type Config, glSchema, hlSchema } from "../config.js";
 import type { SearchParams, Searcher, SerpRecord } from "../types.js";
 import { JobTimeoutError, Queue, QueueFullError } from "./queue.js";
 
@@ -71,11 +71,8 @@ function querySchema(maxPages: number) {
       .min(1, `pages must be between 1 and ${maxPages}`)
       .max(maxPages, `pages must be between 1 and ${maxPages}`)
       .default(1),
-    hl: z
-      .string()
-      .regex(/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?$/, "hl must be a language code such as en or pt-BR")
-      .default("en"),
-    gl: z.string().regex(/^[A-Za-z]{2}$/, "gl must be a two-letter country code such as us").optional(),
+    hl: hlSchema.optional(),
+    gl: glSchema.optional(),
     location: optional,
     tbs: optional,
     cr: optional,
@@ -129,8 +126,9 @@ export function createApp(
 
   app.use(async (c, next) => {
     if (c.req.query("api_key") !== undefined) return c.json({ error: "use Authorization header" }, 400);
-    // shortcut: keyed by socket address only (no X-Forwarded-For trust); behind a proxy all clients share one bucket.
-    const ip = c.env?.incoming?.socket?.remoteAddress ?? "unknown";
+    // TRUST_PROXY: the first X-Forwarded-For entry is whatever the client sent unless the proxy overwrites it.
+    const forwarded = cfg.TRUST_PROXY ? c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() : undefined;
+    const ip = forwarded || (c.env?.incoming?.socket?.remoteAddress ?? "unknown");
     const wait = limiter.take(ip);
     if (wait > 0) {
       c.header("Retry-After", String(wait));
@@ -147,16 +145,21 @@ export function createApp(
   const search = async (c: Context<{ Bindings: HttpBindings }>) => {
     const parsed = schema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: parsed.error.issues[0]!.message }, 400);
-    const { pages, async: asyncFlag, ...rest } = parsed.data;
-    const id = randomUUID().replaceAll("-", "");
+    const { pages, async: asyncFlag, hl = cfg.DEFAULT_HL, gl = cfg.DEFAULT_GL, ...rest } = parsed.data;
+    const newId = () => randomUUID().replaceAll("-", "");
+    const id = newId();
 
     const job = (signal: AbortSignal) =>
       (async () => {
         const records: SerpRecord[] = [];
         for (let page = 1; page <= pages; page++) {
-          const params: SearchParams = { ...rest, page };
+          const params: SearchParams = { ...rest, hl, gl, page };
           const r = await searcher.search(params, signal);
-          records.push({ ...r, search_metadata: { ...r.search_metadata, id } });
+          // Each page of a multi-page request is also fetchable on its own id.
+          const pageId = pages === 1 ? id : newId();
+          const record = { ...r, search_metadata: { ...r.search_metadata, id: pageId } };
+          if (pages > 1) archive.set(pageId, record);
+          records.push(record);
         }
         return pages === 1 ? records[0]! : records;
       })();

@@ -91,6 +91,22 @@ Claude Desktop (`claude_desktop_config.json`):
 
 Run `npm run egress:up` first, or set `SCRAPER_PROXY` in `.env`.
 
+## Settings
+
+All optional, in `.env`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DEFAULT_GL`, `DEFAULT_HL` | `us`, `en` | Used when a query gives no `gl`/`hl`. Set `DEFAULT_GL=` to send none. |
+| `POOL_SIZE` | 1 | Parallel browser identities. |
+| `BROWSER_MAX_PAGES` | 50 | Restart the browser after this many pages (0 = never). |
+| `EXIT_MAX_QUERIES` | 300 | Take a new exit session after this many queries (0 = never). |
+| `TRUST_PROXY` | off | Rate-limit by the first `X-Forwarded-For` address. Only behind a proxy that overwrites that header. |
+| `EGRESS_DAILY_LIMIT` | 100000 | Local cap on Worker requests per UTC day. |
+| `SAVE_HTML` | | Directory to save every fetched page in. |
+
+`gl` sets the country of the organic results. The local pack still follows the exit IP's city, so use `location` for local queries.
+
 ## Docker
 
 ```bash
