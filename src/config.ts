@@ -7,6 +7,13 @@ export const hlSchema = z
   .string()
   .regex(/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,4})?$/, "hl must be a language code such as en or pt-BR");
 export const glSchema = z.string().regex(/^[A-Za-z]{2}$/, "gl must be a two-letter country code such as us");
+// links_wait in seconds, same rules in the HTTP API, the CLI and MCP.
+export const LINKS_WAIT_MAX_S = 120;
+const linksWaitRange = `links_wait must be between 0 and ${LINKS_WAIT_MAX_S}`;
+export const linksWaitSchema = z
+  .number({ error: "links_wait must be a number" })
+  .min(0, linksWaitRange)
+  .max(LINKS_WAIT_MAX_S, linksWaitRange);
 
 /** Exits sit in many countries; without a gl Google answers in the exit's language. `DEFAULT_GL=` turns it off. */
 const defaultsSchema = z.object({

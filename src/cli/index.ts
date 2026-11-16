@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import type { Runtime } from "../bootstrap.js";
-import { glSchema, hlSchema, searchDefaults } from "../config.js";
+import { glSchema, hlSchema, linksWaitSchema, searchDefaults } from "../config.js";
 import { readEgressState, STATE_FILE } from "../egress/state.js";
 import type { SearchParams, SerpRecord } from "../types.js";
 import { answered, FORMATS, type Format, openWriter, type Sink } from "./output.js";
@@ -17,7 +17,7 @@ const ROOT = resolve(import.meta.dirname, "../..");
 
 const USAGE = `usage:
   gitup-serp search [query...] [--input FILE] [--pages N] [--hl LANG] [--gl CC] [--location TEXT]
-                    [--links N] [--format jsonl|json|csv] [--output FILE] [--resume]
+                    [--links N] [--links-wait S] [--format jsonl|json|csv] [--output FILE] [--resume]
   gitup-serp doctor
 queries come from the arguments, --input (one per line) or stdin`;
 
@@ -42,6 +42,7 @@ export interface SearchOptions {
   gl?: string;
   location?: string;
   links?: number;
+  links_wait?: number;
   format: Format;
   output?: string;
   resume: boolean;
@@ -52,6 +53,14 @@ function int(name: string, raw: string | undefined, min: number): number | undef
   const n = Number(raw);
   if (!Number.isInteger(n) || n < min) throw new UsageError(`--${name} must be an integer of ${min} or more`);
   return n;
+}
+
+/** `--links-wait` under the API's rule and message. */
+function linksWait(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const r = linksWaitSchema.safeParse(raw.trim() === "" ? NaN : Number(raw));
+  if (!r.success) throw new UsageError(r.error.issues[0]!.message);
+  return r.data;
 }
 
 /** `--hl`/`--gl` under the API's rules and messages, else the DEFAULT_HL/DEFAULT_GL env. */
@@ -82,6 +91,7 @@ export function parseSearchArgs(args: string[], env: NodeJS.ProcessEnv = {}): Se
         gl: { type: "string" },
         location: { type: "string" },
         links: { type: "string" },
+        "links-wait": { type: "string" },
         format: { type: "string" },
         output: { type: "string" },
         resume: { type: "boolean" },
@@ -101,6 +111,7 @@ export function parseSearchArgs(args: string[], env: NodeJS.ProcessEnv = {}): Se
     ...locale(v.hl, v.gl, env),
     location: v.location,
     links: int("links", v.links, 0),
+    links_wait: linksWait(v["links-wait"]),
     format,
     output: v.output,
     resume: v.resume ?? false,
@@ -169,7 +180,7 @@ async function search(args: string[], deps: Deps): Promise<number> {
 
   const runQuery = async (q: string) => {
     for (let page = 1; page <= opts.pages && !ac.signal.aborted; page++) {
-      const params: SearchParams = { q, page, hl: opts.hl, gl: opts.gl, location: opts.location, links: opts.links };
+      const params: SearchParams = { q, page, hl: opts.hl, gl: opts.gl, location: opts.location, links: opts.links, links_wait: opts.links_wait };
       const start = performance.now();
       let record: SerpRecord;
       try {

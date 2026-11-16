@@ -11,10 +11,15 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { OrganicResult } from "../parse/index.js";
 
-/** Lookups in flight at once for one page. */
-export const PARALLEL = 4;
-/** Milliseconds one page's lookups may take in all; what is still out then stays null. */
-export const LINK_BUDGET_MS = 30_000;
+const envInt = (name: string, def: number): number => {
+  const n = Number(process.env[name]);
+  return Number.isInteger(n) && n > 0 ? n : def;
+};
+
+/** Lookups in flight at once for one page (`LINK_PARALLEL`). A held link waits without taking one. */
+export const PARALLEL = envInt("LINK_PARALLEL", 4);
+/** Milliseconds one page's lookups may take in all; what is still out then stays null (`LINK_BUDGET_MS`). */
+export const LINK_BUDGET_MS = envInt("LINK_BUDGET_MS", 30_000);
 /** The longest "Verifying your request" delay worth waiting out, in seconds. */
 export const HELD_WAIT_MAX_S = 30;
 /** Times a held link is asked again before it is left empty. */
@@ -101,10 +106,16 @@ function tokenOf(link: string): string | null {
   }
 }
 
+/** The page's link budget for a request's `links_wait` (seconds): the smaller of the two. */
+export function linkBudgetMs(linksWaitS: number | undefined, budgetMs = LINK_BUDGET_MS): number {
+  return linksWaitS === undefined ? budgetMs : Math.min(budgetMs, Math.round(linksWaitS * 1000));
+}
+
 /**
  * Fill `link` for each result that has none but a `/goto` redirect: its ping URL first (from
  * `pings`, token to path), then the `/goto` itself, waiting out a held page. At most `parallel`
- * lookups run at once, all within `budgetMs`. A sorry answer stops this page's lookups; an error
+ * lookups run at once, all within `budgetMs`; a held page's wait does not count against `parallel`
+ * and must end before the budget does. When the budget runs out the lookups still out are aborted. A sorry answer stops this page's lookups; an error
  * leaves that one result null. Resolves when every lookup has settled; never rejects.
  */
 export async function fillLinks(
@@ -123,14 +134,27 @@ export async function fillLinks(
   const page = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let stopped = false;
 
+  // Slots are taken per lookup, not per result, so a link waiting out a held page frees its slot.
+  let free = parallel;
+  const queued: (() => void)[] = [];
+  const release = () => {
+    const next = queued.shift();
+    if (next) next();
+    else free++;
+  };
+
   const ask = async (path: string): Promise<LinkAnswer | null> => {
-    if (stopped || page.aborted) return null;
+    if (free > 0) free--;
+    else await new Promise<void>((r) => queued.push(r));
     try {
+      if (stopped || page.aborted) return null;
       const a = await lookup(new URL(path, origin).href, page);
       if (!refused(a)) return a;
       stopped = true; // Google is refusing this exit: no more lookups for this page
     } catch {
       // A network error or the budget ran out: this result stays null.
+    } finally {
+      release();
     }
     return null;
   };
@@ -170,13 +194,10 @@ export async function fillLinks(
     return null;
   };
 
-  let i = 0;
-  const worker = async () => {
-    while (i < todo.length && !stopped && !page.aborted) {
-      const r = todo[i++]!;
+  await Promise.all(
+    todo.map(async (r) => {
       const link = await one(r).catch(() => null);
       if (link) r.link = link;
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(parallel, todo.length) }, worker));
+    }),
+  );
 }

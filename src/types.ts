@@ -18,6 +18,8 @@ export interface SearchParams {
   lr?: string;
   /** Organic results whose `/goto` link is resolved, from the top: default all, 0 = off. */
   links?: number;
+  /** Seconds to wait for links; what is unresolved then stays null. Default: the link budget only. */
+  links_wait?: number;
 }
 
 export interface SerpRecord {

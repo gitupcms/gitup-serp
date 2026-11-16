@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono, type Context } from "hono";
 import type { HttpBindings } from "@hono/node-server";
 import { z } from "zod";
-import { type Config, glSchema, hlSchema } from "../config.js";
+import { type Config, glSchema, hlSchema, linksWaitSchema } from "../config.js";
 import type { SearchParams, Searcher, SerpRecord } from "../types.js";
 import { JobTimeoutError, Queue, QueueFullError } from "./queue.js";
 
@@ -82,6 +82,7 @@ function querySchema(maxPages: number) {
       .int("links must be an integer")
       .min(0, "links must be 0 or more")
       .optional(),
+    links_wait: z.coerce.number({ error: "links_wait must be a number" }).pipe(linksWaitSchema).optional(),
     async: z.enum(["true", "false", "1", "0"], { error: "async must be true or false" }).optional(),
   });
 }

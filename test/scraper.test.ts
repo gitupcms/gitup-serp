@@ -329,6 +329,16 @@ describe("Scraper", () => {
     await s.close();
   });
 
+  it("leaves links alone with links_wait=0", async () => {
+    const p = pool(["good"]);
+    const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0] });
+    const r = await s.search({ ...params(), links_wait: 0 });
+    expect((r.organic_results as { link: string | null }[])[2]!.link).toBeNull();
+    expect(fake.lookups).toEqual([]);
+    expect(r.search_parameters.links_wait).toBe(0);
+    await s.close();
+  });
+
   it("keeps the page and the exit when lookups are refused", async () => {
     fake.gotoSorry = true;
     const p = pool(["good"]);
@@ -491,5 +501,17 @@ describe("proxy", () => {
     expect(() => new ProxyTemplate("ftp://u:p@gate:21")).toThrow(/scheme/);
     expect(() => new ProxyTemplate("http://gate")).toThrow(/port/);
     expect(() => new ProxyTemplate("not a url secret")).toThrow();
+  });
+});
+
+describe("auto location from gl", async () => {
+  const { countryName } = await import("../src/scraper/index.js");
+  it("pins the local pack to the gl country when no location is given", () => {
+    expect(countryName("us")).toBe("United States");
+    expect(countryName("zz")).toBeUndefined();
+    const p = { q: "pizza", page: 1, hl: "en" };
+    expect(resultsUrl("https://www.google.com", { ...p, gl: "us" })).toContain(`&uule=${uule("United States")}`);
+    expect(resultsUrl("https://www.google.com", { ...p, gl: "us", location: "Austin,Texas,United States" })).toContain(`&uule=${uule("Austin,Texas,United States")}`);
+    expect(resultsUrl("https://www.google.com", p)).not.toContain("uule");
   });
 });

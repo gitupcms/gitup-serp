@@ -12,7 +12,7 @@ import type { SearchParams, Searcher, SerpRecord, Verdict, VerdictKind } from ".
 import { GOOGLE } from "./browser.js";
 import type { Answer } from "./hybrid.js";
 import { DWELL_S, type Identity, openIdentity } from "./identity.js";
-import { fillLinks } from "./links.js";
+import { fillLinks, linkBudgetMs } from "./links.js";
 import { ProxyTemplate, redact } from "./proxy.js";
 
 export const MAX_EXITS = 3;
@@ -74,8 +74,22 @@ export function resultsUrl(origin: string, p: SearchParams): string {
   u.searchParams.set("hl", p.hl);
   for (const k of ["gl", "tbs", "cr", "lr"] as const) if (p[k]) u.searchParams.set(k, p[k]);
   if (p.page > 1) u.searchParams.set("start", String((p.page - 1) * 10));
+  // Cloudflare exits sit anywhere, and Google places the local pack by the exit IP even with gl;
+  // without a location, pin it to the gl country.
+  const location = p.location || (p.gl ? countryName(p.gl) : undefined);
   // A uule keeps its "+" and base64 as browsers send it.
-  return p.location ? `${u.href}&uule=${uule(p.location)}` : u.href;
+  return location ? `${u.href}&uule=${uule(location)}` : u.href;
+}
+
+const regions = new Intl.DisplayNames(["en"], { type: "region" });
+/** English country name for a two-letter code ("us" → "United States"); undefined when unknown. */
+export function countryName(gl: string): string | undefined {
+  try {
+    const name = regions.of(gl.toUpperCase());
+    return name && name !== gl.toUpperCase() && name !== "Unknown Region" ? name : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function buildRecord(
@@ -166,10 +180,12 @@ export class Scraper implements Searcher {
         const parsed = parseSerp(answer.fetched.html, params.hl);
         // Results for other queries: Google's answer to some automated traffic. Judged before lookups.
         if (poisoned(slot.lowRelevance, params.q, parsed.organic_results.map((r) => r.title))) return { answer, parsed, poisoned: true };
-        if (identity.lookup && params.links !== 0) {
+        if (identity.lookup && params.links !== 0 && params.links_wait !== 0) {
           // Lookups never throw and a refusal there does not touch the exit rotation.
+          // links_wait shortens the budget, so lookups still out then are aborted, not left holding the identity.
           const lookup = identity.lookup.bind(identity);
-          await fillLinks(parsed.organic_results.slice(0, params.links), parsed.ping_paths, lookup, this.origin, signal);
+          const budgetMs = linkBudgetMs(params.links_wait);
+          await fillLinks(parsed.organic_results.slice(0, params.links), parsed.ping_paths, lookup, this.origin, signal, { budgetMs });
         }
         return { answer, parsed, poisoned: false };
       });

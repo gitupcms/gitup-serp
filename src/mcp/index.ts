@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { startRuntime, type Runtime } from "../bootstrap.js";
-import { glSchema, hlSchema, searchDefaults, type SearchDefaults } from "../config.js";
+import { glSchema, hlSchema, LINKS_WAIT_MAX_S, linksWaitSchema, searchDefaults, type SearchDefaults } from "../config.js";
 import type { Searcher, SerpRecord } from "../types.js";
 
 export const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
@@ -41,6 +41,12 @@ const TOOL = {
           "How many of the top results on each page get their full URL resolved. Each is a separate " +
           "lookup, so a smaller number answers sooner; 0 skips them.",
       },
+      links_wait: {
+        type: "number",
+        minimum: 0,
+        maximum: LINKS_WAIT_MAX_S,
+        description: "Seconds to wait for those URLs on each page; the ones not resolved by then are left out.",
+      },
     },
     required: ["query"],
   },
@@ -62,6 +68,7 @@ const argsSchema = z.object({
     .int("links must be an integer")
     .min(0, "links must be 0 or more")
     .default(DEFAULT_LINKS),
+  links_wait: linksWaitSchema.optional(),
 });
 
 type Json = Record<string, unknown>;

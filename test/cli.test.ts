@@ -112,6 +112,10 @@ describe("parseSearchArgs", () => {
     [["--pages", "0"]],
     [["--pages", "x"]],
     [["--links", "-1"]],
+    [["--links-wait", "-1"]],
+    [["--links-wait", "121"]],
+    [["--links-wait", "x"]],
+    [["--links-wait", ""]],
     [["--format", "xml"]],
     [["--resume"]],
     [["--resume", "--output", "o.csv", "--format", "csv"]],
@@ -120,6 +124,13 @@ describe("parseSearchArgs", () => {
     [["--gl", "usa"]],
   ])("refuses %j", (args) => {
     expect(() => parseSearchArgs(args)).toThrow(UsageError);
+  });
+
+  it("reads --links-wait in seconds under the API's rule and message", () => {
+    expect(parseSearchArgs(["q", "--links-wait", "2.5"]).links_wait).toBe(2.5);
+    expect(parseSearchArgs(["q", "--links-wait", "0"]).links_wait).toBe(0);
+    expect(parseSearchArgs(["q"]).links_wait).toBeUndefined();
+    expect(() => parseSearchArgs(["q", "--links-wait", "121"])).toThrow("links_wait must be between 0 and 120");
   });
 
   it("gives hl/gl errors the API's messages and DEFAULT_* fills them in", () => {

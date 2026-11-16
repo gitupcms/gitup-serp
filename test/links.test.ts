@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { parseSerp } from "../src/parse/index.js";
 import type { OrganicResult } from "../src/parse/index.js";
-import { destination, fillLinks, heldRefresh, type LinkAnswer, pingDestination } from "../src/scraper/links.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { destination, fillLinks, heldRefresh, LINK_BUDGET_MS, linkBudgetMs, type LinkAnswer, pingDestination } from "../src/scraper/links.js";
 
 const ORIGIN = "https://www.google.com";
 
@@ -189,6 +190,59 @@ describe("fillLinks", () => {
     await fillLinks(rs, PINGS, lookup, ORIGIN, undefined, { budgetMs: 50 });
     expect(performance.now() - started).toBeLessThan(1_000);
     expect(rs.every((r) => r.link === null)).toBe(true);
+  });
+
+  it("lets other lookups run while a held link waits out its delay", async () => {
+    const f = fake({
+      [PING_A]: [ok(interstitial("AAA", 3))],
+      [PING_B]: [ok(pingAnswer("https://bbb.example/"))],
+      "/goto?url=AAA": [redirect("https://aaa.example/")],
+    });
+    const rs = results("AAA", "BBB");
+    await fillLinks(rs, PINGS, f.lookup, ORIGIN, undefined, { parallel: 1, wait: (ms, s) => sleep(ms / 1000, undefined, { signal: s }) });
+    expect(rs.map((r) => r.link)).toEqual(["https://aaa.example/", "https://bbb.example/"]);
+    expect(f.asked).toEqual([PING_A, PING_B, "/goto?url=AAA"]); // B went out during A's hold
+  });
+
+  it("overlaps the held waits of a page instead of queueing them behind the slots", async () => {
+    // 10 links, each held once for 3 s (scaled to 3 ms + margin) before it redirects; 4 slots.
+    const tokens = Array.from({ length: 10 }, (_, i) => `H${i}`);
+    const answers: Record<string, LinkAnswer[]> = {};
+    for (const t of tokens) answers[`/goto?url=${t}`] = [ok(interstitial(t, 3)), redirect(`https://${t.toLowerCase()}.example/`)];
+    const f = fake(answers);
+    let waits = 0;
+    let peakWaits = 0;
+    const wait = async (ms: number, s: AbortSignal) => {
+      peakWaits = Math.max(peakWaits, ++waits);
+      await sleep(ms / 1000, undefined, { signal: s });
+      waits--;
+    };
+    const rs = results(...tokens);
+    await fillLinks(rs, {}, f.lookup, ORIGIN, undefined, { wait });
+    expect(rs.every((r) => r.link !== null)).toBe(true);
+    expect(peakWaits).toBeGreaterThan(4); // more links held at once than there are slots
+  });
+
+  it("links_wait cuts the budget: links in by then are kept, the rest are aborted and stay null", async () => {
+    expect(linkBudgetMs(undefined)).toBe(LINK_BUDGET_MS);
+    expect(linkBudgetMs(2.5, 30_000)).toBe(2_500);
+    expect(linkBudgetMs(120, 30_000)).toBe(30_000);
+    const aborted: string[] = [];
+    const lookup = (url: string, signal: AbortSignal) => {
+      const t = new URL(url).searchParams.get("url")!;
+      if (t === "AAA" || t === "BBB") return Promise.resolve(redirect(`https://${t.toLowerCase()}.example/`));
+      return new Promise<LinkAnswer>((_, reject) =>
+        signal.addEventListener("abort", () => (aborted.push(t), reject(signal.reason)), { once: true }),
+      );
+    };
+    const rs = results("AAA", "CCC", "BBB", "DDD");
+    const started = performance.now();
+    await fillLinks(rs, {}, lookup, ORIGIN, undefined, { budgetMs: linkBudgetMs(0.05) });
+    const took = performance.now() - started;
+    expect(took).toBeGreaterThanOrEqual(40);
+    expect(took).toBeLessThan(1_000);
+    expect(rs.map((r) => r.link)).toEqual(["https://aaa.example/", null, "https://bbb.example/", null]);
+    expect(aborted.sort()).toEqual(["CCC", "DDD"]);
   });
 
   it("honours the caller's abort", async () => {

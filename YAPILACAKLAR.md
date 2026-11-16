@@ -32,7 +32,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Yük testi: 50 sorgu (CLI, link çözme kapalı) **50/50 başarılı**, hiç engel yok. Ortanca süre 5,2 sn, p90 6,6 sn. İlk sorgu ısınmayla birlikte 46 sn sürdü.
 - [ ] Daha büyük yük testi: 500+ sorgu ve `POOL_SIZE` > 1.
 - [ ] Birden çok Cloudflare hesabı: kota ve IP çeşitliliği için.
-- [~] Çıkış ülkesi seçimi: Cloudflare'de seçilemiyor. Varsayılan `DEFAULT_GL=us` ve `DEFAULT_HL=en` eklendi (API, CLI ve MCP). Organik sonuçlar artık gl'ye uyuyor, ama yerel paket hâlâ çıkış IP'sinin şehrine göre geliyor ("pizza near me": organik sonuçlar Orlando'dan, yerel paket Londra'dan). Bunu çözmek için `location` (uule) ya da upstream proxy zinciri gerekiyor. `gl` verilmeyen bir sorgu Japonca sonuç döndürdü; sonuçlar çıkış IP'sinin konumuna göre değişiyor. Yapılabilecekler: varsayılan `gl` ve `hl` vermek, ya da bir upstream SOCKS veya HTTP proxy'ye isteğe bağlı zincirleme.
+- [+] Çıkış ülkesi: Cloudflare'de seçilemiyor, ama artık gerek kalmadı. Varsayılan `DEFAULT_GL=us` ve `DEFAULT_HL=en`; `location` verilmezse gl ülkesi uule olarak gönderiliyor. Canlıda yerel paket artık doğru ülkeden geliyor: us için Colorado ve Missouri, tr için Gaziantep ve Bursa. Önceden Londra geliyordu. Şehir düzeyinde konum için `location` verilmeli.
 
 ## 2. Tarayıcı, kimlik ve hibrit akış
 - [+] patchright, görünür pencere (headful), kalıcı profil. Proxy doğrudan tarayıcıya veriliyor; serpmaven'deki gibi kimlik doğrulamasız yerel relay yok.
@@ -69,8 +69,8 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Aynı anda en fazla 4 istek, sayfa başına 30 saniye bütçe. Hata olursa yalnızca o link `null` kalıyor, mekanizma kendini kapatmıyor.
 - [+] API `links` parametresi (varsayılan: hepsi, `0`: kapalı).
 - [+] Canlı: 33/33 link çözüldü.
-- [ ] `links_wait`: S saniye sonra o ana kadar çözülen linklerle yanıt vermek (serpmaven'de var).
-- [ ] Hız: link çözme sayfa başına 14-30 saniye sürüyor. Bütçe ve paralellik ayarlanacak.
+- [+] `links_wait` (API, `--links-wait`, MCP): S saniye sonra o ana kadar çözülen linklerle yanıt veriyor, kalan istekler iptal ediliyor. Canlıda `links_wait=8` ile 9 linkin 5'i çözüldü, sayfa 9,5 sn sürdü.
+- [~] Hız: bekletilen ("Verifying your request") linkler artık paralel yuvayı tutmuyor; `LINK_PARALLEL` ve `LINK_BUDGET_MS` ayarlanabiliyor. Canlıda belirgin bir hızlanma görülmedi: çoğu sayfa 16-26 sn sürdü, ama 60-93 sn süren aykırı sayfalar da oldu. Linklerin hepsi çözüldü. Zamanın nereye gittiğini görmek için sayfa başına zaman logu gerekiyor.
 
 ## 5. HTTP API (Hono)
 - [+] `GET /search.json` (`/search`): `q`, `pages`, `hl`, `gl`, `location` (uule), `tbs`, `cr`, `lr`, `links`, `async`.

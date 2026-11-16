@@ -82,10 +82,21 @@ describe("validation", () => {
     ["/search.json?q=a&pages=x", "pages must be an integer"],
     ["/search.json?q=a&gl=usa", "gl must be a two-letter country code such as us"],
     ["/search.json?q=a&hl=english", "hl must be a language code such as en or pt-BR"],
+    ["/search.json?q=a&links_wait=x", "links_wait must be a number"],
+    ["/search.json?q=a&links_wait=-1", "links_wait must be between 0 and 120"],
+    ["/search.json?q=a&links_wait=121", "links_wait must be between 0 and 120"],
   ])("%s -> 400", async (url, error) => {
     const res = await make().request(url, { headers: auth });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error });
+  });
+
+  it("passes links_wait on in seconds, 0 included", async () => {
+    const fake = new Fake();
+    await make(fake).request("/search.json?q=a&links_wait=2.5", { headers: auth });
+    await make(fake).request("/search.json?q=a&links_wait=0", { headers: auth });
+    await make(fake).request("/search.json?q=a", { headers: auth });
+    expect(fake.calls.map((c) => c.links_wait)).toEqual([2.5, 0, undefined]);
   });
 });
 

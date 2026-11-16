@@ -108,6 +108,9 @@ describe("mcp handler", () => {
       [{}, "query is required"],
       [{ query: "x", pages: 4 }, "pages must be between 1 and 3"],
       [{ query: "x", links: -1 }, "links must be 0 or more"],
+      [{ query: "x", links_wait: 121 }, "links_wait must be between 0 and 120"],
+      [{ query: "x", links_wait: -1 }, "links_wait must be between 0 and 120"],
+      [{ query: "x", links_wait: "5" }, "links_wait must be a number"],
       [{ query: "x", gl: "usa" }, "gl must be"],
     ] as const) {
       const r = (await h(callTool(args))) as any;

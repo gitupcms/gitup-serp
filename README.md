@@ -56,6 +56,7 @@ Parameters:
 | `location` | Location, sent to Google as uule. |
 | `tbs`, `cr`, `lr` | Google's own filters. |
 | `links` | How many result links to resolve. `0` turns it off and makes the query much faster. |
+| `links_wait` | Seconds to wait for links (0-120); answers with what was resolved by then. |
 | `async` | `true` returns an id right away. |
 
 Pass the key as `Authorization: Bearer`; `?api_key=` is refused. Binding to anything other than loopback requires `OPENSERP_API_KEY`.
@@ -103,9 +104,10 @@ All optional, in `.env`:
 | `EXIT_MAX_QUERIES` | 300 | Take a new exit session after this many queries (0 = never). |
 | `TRUST_PROXY` | off | Rate-limit by the first `X-Forwarded-For` address. Only behind a proxy that overwrites that header. |
 | `EGRESS_DAILY_LIMIT` | 100000 | Local cap on Worker requests per UTC day. |
+| `LINK_PARALLEL`, `LINK_BUDGET_MS` | 4, 30000 | Link lookups at once per page, and the time a page's lookups may take in total. |
 | `SAVE_HTML` | | Directory to save every fetched page in. |
 
-`gl` sets the country of the organic results. The local pack still follows the exit IP's city, so use `location` for local queries.
+Without `location`, the `gl` country is sent as the location, so the local pack lands in that country (not the exit IP's). Pass `location` for a city.
 
 ## Docker
 
