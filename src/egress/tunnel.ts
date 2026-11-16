@@ -5,16 +5,21 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import type { Duplex } from "node:stream";
 import WebSocket, { createWebSocketStream } from "ws";
+import { UsageCounter } from "./usage.js";
 
 export interface TunnelOptions {
   workers: string[]; // https://<name>.<sub>.workers.dev
   token: string;
   cooldownMs?: number;
   maxCooldownMs?: number;
+  usageFile?: string; // default <EGRESS_STATE_DIR>/usage.json
+  dailyLimit?: number; // default EGRESS_DAILY_LIMIT or 100000
 }
 
 /** A Worker answered but refused the target (403): not the Worker's fault, so no cooldown. */
 class TargetRefused extends Error {}
+/** Today's Worker request quota is used up. */
+class QuotaExceeded extends Error {}
 
 export class EgressTunnel {
   private readonly server = http.createServer((_req, res) => {
@@ -26,9 +31,11 @@ export class EgressTunnel {
   private readonly sockets = new Set<Duplex>();
   private readonly health = new Map<string, { fails: number; until: number }>();
   private next = 0;
+  readonly usage: UsageCounter;
 
   constructor(private readonly opts: TunnelOptions) {
     if (opts.workers.length === 0) throw new Error("egress: no workers, run npm run egress:up");
+    this.usage = new UsageCounter(opts.usageFile, opts.dailyLimit);
     this.server.on("connect", (req: http.IncomingMessage, socket: Duplex, head: Buffer) => this.onConnect(req, socket, head));
   }
 
@@ -44,6 +51,7 @@ export class EgressTunnel {
   async close(): Promise<void> {
     for (const s of this.sockets) s.destroy();
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    this.usage.flush();
   }
 
   private authOk(header: string | undefined): boolean {
@@ -73,7 +81,7 @@ export class EgressTunnel {
         if (head.length) stream.write(head);
         socket.pipe(stream).pipe(socket);
       },
-      (err) => reply(err instanceof TargetRefused ? "403 Forbidden" : "502 Bad Gateway"),
+      (err) => reply(err instanceof TargetRefused ? "403 Forbidden" : err instanceof QuotaExceeded ? "429 Too Many Requests" : "502 Bad Gateway"),
     );
   }
 
@@ -86,6 +94,8 @@ export class EgressTunnel {
       const url = workers[idx]!;
       if ((this.health.get(url)?.until ?? 0) > Date.now()) continue;
       this.next = (idx + 1) % workers.length;
+      // Every dial is one Worker request on the account's daily quota, retries included.
+      if (!this.usage.take()) throw new QuotaExceeded();
       try {
         const ws = await this.dial(url, target);
         this.health.delete(url);

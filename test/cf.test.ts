@@ -46,6 +46,44 @@ describe("CloudflareApi", () => {
     expect(d.mock.calls[0]![1]!.method).toBe("DELETE");
   });
 
+  describe("ensureSubdomain", () => {
+    const reply = (status: number, result: unknown = null) =>
+      new Response(JSON.stringify({ success: status < 400, errors: status < 400 ? [] : [{ code: 1, message: "x" }], result }), { status });
+
+    it("keeps an existing subdomain", async () => {
+      const f = mockFetch({ subdomain: "me" });
+      expect(await new CloudflareApi("t", "a", f).ensureSubdomain()).toBe("me");
+      expect(f).toHaveBeenCalledTimes(1);
+    });
+
+    it("creates a random openserp- subdomain when there is none, retrying once on conflict", async () => {
+      const f = vi.fn<typeof fetch>()
+        .mockResolvedValueOnce(reply(404))
+        .mockResolvedValueOnce(reply(409))
+        .mockResolvedValueOnce(reply(200, { subdomain: "ok" }));
+      const sub = await new CloudflareApi("t", "a", f).ensureSubdomain();
+      expect(sub).toMatch(/^openserp-[0-9a-f]{8}$/);
+      const puts = f.mock.calls.slice(1);
+      expect(puts.map(([u, i]) => [u, i?.method])).toEqual([
+        ["https://api.cloudflare.com/client/v4/accounts/a/workers/subdomain", "PUT"],
+        ["https://api.cloudflare.com/client/v4/accounts/a/workers/subdomain", "PUT"],
+      ]);
+      const names = puts.map(([, i]) => JSON.parse(i!.body as string).subdomain);
+      expect(names[1]).toBe(sub);
+      expect(names[0]).not.toBe(sub);
+    });
+
+    it("gives up after the second conflict and does not retry other errors", async () => {
+      const twice = vi.fn<typeof fetch>().mockResolvedValueOnce(reply(404)).mockResolvedValue(reply(409));
+      await expect(new CloudflareApi("t", "a", twice).ensureSubdomain()).rejects.toThrow(/HTTP 409/);
+      expect(twice).toHaveBeenCalledTimes(3);
+
+      const denied = vi.fn<typeof fetch>().mockResolvedValueOnce(reply(404)).mockResolvedValue(reply(403));
+      await expect(new CloudflareApi("t", "a", denied).ensureSubdomain()).rejects.toThrow(/HTTP 403/);
+      expect(denied).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it("errors carry the API message but never the token", async () => {
     const err = await new CloudflareApi("secret-api-token", "a", mockFetch(null, 403)).remove("w").catch((e: Error) => e);
     expect((err as Error).message).toMatch(/HTTP 403 10000 bad/);

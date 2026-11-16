@@ -19,6 +19,11 @@ describe("worker guard", () => {
     expect((await get("/tunnel", ok, {})).status).toBe(401);
   });
 
+  it("401 for a wrong token on a well-formed websocket upgrade", async () => {
+    const upgrade = { ...ok, connection: "Upgrade", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==", "sec-websocket-version": "13" };
+    expect((await get("/tunnel", { ...upgrade, authorization: "Bearer wrong-token" })).status).toBe(401);
+  });
+
   it("404 on other paths and methods", async () => {
     expect((await get("/", ok)).status).toBe(404);
     expect((await get("/tunnel/x", ok)).status).toBe(404);

@@ -26,12 +26,13 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] `npm start`: `SCRAPER_PROXY` boşsa Cloudflare çıkışını otomatik kullanıyor.
 - [+] Canlı: token'sız istek 401, başka yollar 404, Google 6/6 başarılı.
 - [ ] Kalıcı `CF_API_TOKEN` ve `CF_ACCOUNT_ID` `.env` dosyasına yazılacak. Şimdilik wrangler OAuth token'ı kullanılıyor.
-- [ ] Hesapta workers.dev alt alan adı yoksa otomatik oluşturulacak.
-- [ ] Kota sayacı: ücretsiz planda günde 100 bin istek sınırı var. Worker ve gün bazında sayım yapılıp sınıra yaklaşınca uyarı verilecek. Bu, serpmaven'deki maliyet raporunun karşılığı.
+- [~] Hesapta workers.dev alt alan adı yoksa otomatik oluşturuluyor (`ensureSubdomain`). Alt alan adı olmayan bir hesapta canlı denenmedi.
+- [+] Kota sayacı (`src/egress/usage.ts`): UTC günü bazında sayıyor, %80'de uyarı veriyor, %100'de 429 dönüyor. Sayım `egress:ls` ile görülüyor. Durum klasörü `EGRESS_STATE_DIR` ile değiştirilebiliyor.
+- [+] 401/400 durumu canlıda doğrulandı. Yanlış token'la eksiksiz WebSocket isteği 401 alıyor. 400, `Sec-WebSocket-Key` eksik olduğunda isteği Cloudflare'in reddetmesinden geliyor, bizim koddan değil.
+- [+] Yük testi: 50 sorgu (CLI, link çözme kapalı) **50/50 başarılı**, hiç engel yok. Ortanca süre 5,2 sn, p90 6,6 sn. İlk sorgu ısınmayla birlikte 46 sn sürdü.
+- [ ] Daha büyük yük testi: 500+ sorgu ve `POOL_SIZE` > 1.
 - [ ] Birden çok Cloudflare hesabı: kota ve IP çeşitliliği için.
-- [ ] Çıkış ülkesi seçimi: Cloudflare'de seçilemiyor. Seçenek: bir upstream SOCKS veya HTTP proxy'ye isteğe bağlı zincirleme (CFspider'daki fikir).
-- [ ] Yanlış token'la gelen istek 401 yerine 400 alıyor. Büyük olasılıkla Cloudflare'in WebSocket kontrolünden kaynaklanıyor; incelenecek.
-- [ ] Yük testi: 50-100 sorguda Cloudflare IP'lerinin ne zaman engellendiği ölçülecek.
+- [ ] Çıkış ülkesi seçimi: Cloudflare'de seçilemiyor. `gl` verilmeyen bir sorgu Japonca sonuç döndürdü; sonuçlar çıkış IP'sinin konumuna göre değişiyor. Yapılabilecekler: varsayılan `gl` ve `hl` vermek, ya da bir upstream SOCKS veya HTTP proxy'ye isteğe bağlı zincirleme.
 
 ## 2. Tarayıcı, kimlik ve hibrit akış
 - [+] patchright, görünür pencere (headful), kalıcı profil. Proxy doğrudan tarayıcıya veriliyor; serpmaven'deki gibi kimlik doğrulamasız yerel relay yok.
@@ -56,7 +57,9 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Sınıflandırıcı: tanınmayan sayfaya `block` değil `unknown` diyor. HTTP 429 `sorry`, 403 `block` sayılıyor.
 - [+] Engel sayfası metinleri ve AI Overview başlığı tr, de, fr ve es dillerinde de tanınıyor.
 - [+] Canlı: organik sonuçlar ve "People also ask" geliyor.
-- [~] AI Overview'u yapıdan tanıyan seçiciler ve yabancı dil metinleri tahmine dayalı; canlıda doğrulanacak. Testlerde `ai_overview` hiç dolmadı.
+- [+] Canlı: AI Overview 50 sorgunun 20'sinde doldu.
+- [~] Yabancı dillerdeki engel ve AI Overview metinleri tahmine dayalı, canlıda doğrulanmadı.
+- [ ] Reklamlar: 50 sorgunun hiçbirinde reklam gelmedi. Seçici hatası mı, yoksa bu IP'lere reklam gösterilmiyor mu, bilinmiyor.
 - [ ] Gerçek Google HTML örnekleri (`SAVE_HTML` ile) test fixture'ı olarak eklenecek.
 - [ ] Günlük canlı kontrol: Google HTML yapısını değiştirince haber verecek bir canary testi.
 - [ ] Yerel sonuçların ve reklamların canlıda kontrolü.
@@ -80,25 +83,28 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [ ] OpenAPI ya da şema dokümanı.
 
 ## 6. CLI (serpmaven `search`)
-- [ ] `openserp search "sorgu"`: dosyadan ya da stdin'den sorgu okuma.
-- [ ] `--pages`, `--hl`, `--gl`, `--location`, `--links`.
-- [ ] `--format jsonl|json|csv`, `--output`.
-- [ ] `--resume` (serpmaven `output.answered`).
-- [ ] `--workers` (havuz), ilerleme çıktısı.
-- [ ] `openserp doctor`: Chromium, curl-impersonate, Cloudflare durumu ve ekran (display) kontrolü.
+- [+] `npm run cli -- search "sorgu"`: sorgular argümandan, `--input` dosyasından ya da stdin'den okunabiliyor.
+- [+] `--pages`, `--hl`, `--gl`, `--location`, `--links`, `--format jsonl|json|csv`, `--output`, `--resume`.
+- [+] Paralellik `POOL_SIZE` ile ayarlanıyor. İlerleme stderr'e yazılıyor. Çıkış kodları: 0, 1, 2, Ctrl-C'de 130.
+- [+] `doctor`: Node, curl-impersonate, Chromium, ekran ve egress kontrol ediliyor. Token değerleri gösterilmiyor.
+- [+] Canlı: 50 sorgu CLI ile çalıştı.
+- [ ] `bin` girdisi (`gitup-serp`) PATH'te tsx gerektiriyor. Küçük bir JS sarmalayıcı yazılacak.
+- [ ] `--hl` ve `--gl` doğrulaması.
 - [-] `login` / `logout` (NodeMaven): kullanılmıyor, yerine `egress:*` komutları var.
 
 ## 7. MCP sunucusu
-- [ ] stdio JSON-RPC, tek araç `google_search(query, pages 1-3, hl, gl, links)`.
-- [ ] Kısa yanıt biçimi: `results`, `related_questions`, `related_searches`, `ai_overview`, `places`, `errors`.
+- [+] `npm run mcp`: stdio JSON-RPC, SDK yok, tek araç `google_search(query, pages 1-3, hl, gl, links)`. Runtime ilk çağrıda başlatılıyor (lazy).
+- [+] Kısa yanıt biçimi: `results`, `related_questions`, `related_searches`, `ai_overview`, `places`, `errors`.
+- [+] Canlı: `tools/call` ile 9 sonuç geldi, linkler ve AI Overview dolu. stdout yalnızca JSON satırlarından oluşuyor.
+- [ ] Claude Desktop ve Claude Code için örnek ayar (README).
 
 ## 8. Dağıtım ve işletim
 - [+] `npm run setup`: Chromium (`.browsers/`) ve curl-impersonate (`bin/`).
 - [+] `.env` ve `.env.example`; `npm start` `.env` dosyasını okuyor.
 - [ ] Dockerfile: Node, Xvfb, tini, root olmayan kullanıcı, `HEALTHCHECK`.
 - [ ] CI (GitHub Actions): tip kontrolü, testler, Worker paketi.
-- [ ] README: kurulum, Cloudflare token adımları, API örnekleri.
-- [ ] İlk commit.
+- [~] README: kısa kurulum ve kaynakça var. Cloudflare token adımları ve API örnekleri eksik.
+- [+] İlk commit (`gitupcms/gitup-serp`).
 
 ## 9. Bilerek yapılmayanlar
 - [-] NodeMaven SDK ve demo hesabı. Yerine Cloudflare çıkışı kullanılıyor.

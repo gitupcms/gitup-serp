@@ -1,5 +1,8 @@
+import { mkdtempSync, readFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createWebSocketStream, WebSocketServer } from "ws";
 import { EgressTunnel } from "../src/egress/tunnel.js";
@@ -12,6 +15,8 @@ let echo: net.Server, worker: http.Server, dead: net.Server, tunnel: EgressTunne
 let deadHits = 0;
 const targets: string[] = [];
 let proxy: URL;
+let workerPort: number;
+const usageFile = join(mkdtempSync(join(tmpdir(), "openserp-tunnel-")), "usage.json");
 
 beforeAll(async () => {
   echo = net.createServer((s) => s.pipe(s));
@@ -33,13 +38,13 @@ beforeAll(async () => {
       tcp.pipe(stream).pipe(tcp);
     });
   });
-  const workerPort = await listen(worker);
+  workerPort = await listen(worker);
 
   // Dead Worker: accepts TCP and drops it, counting attempts.
   dead = net.createServer((s) => (deadHits++, s.destroy()));
   const deadPort = await listen(dead);
 
-  tunnel = new EgressTunnel({ workers: [`http://127.0.0.1:${deadPort}`, `http://127.0.0.1:${workerPort}`], token: TOKEN });
+  tunnel = new EgressTunnel({ workers: [`http://127.0.0.1:${deadPort}`, `http://127.0.0.1:${workerPort}`], token: TOKEN, usageFile });
   proxy = new URL((await tunnel.start()).url);
 });
 
@@ -50,9 +55,9 @@ afterAll(async () => {
 
 const auth = () => `Basic ${Buffer.from(`${proxy.username}:${proxy.password}`).toString("base64")}`;
 
-function connect(headers: Record<string, string>): Promise<{ status: number; socket: net.Socket }> {
+function connect(headers: Record<string, string>, via = proxy): Promise<{ status: number; socket: net.Socket }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port: proxy.port, method: "CONNECT", path: "www.google.com:443", headers });
+    const req = http.request({ host: "127.0.0.1", port: via.port, method: "CONNECT", path: "www.google.com:443", headers });
     req.once("connect", (res, socket) => resolve({ status: res.statusCode ?? 0, socket }));
     req.once("error", reject);
     req.end();
@@ -107,5 +112,24 @@ describe("egress tunnel", () => {
     expect(await roundTrip(second.socket, "pong")).toBe("pong");
     second.socket.destroy();
     expect(deadHits).toBe(1);
+    // Three Worker requests: dead + live, then live. Written on the first dial and again on close().
+    expect(tunnel.usage.today).toBe(3);
+  });
+
+  it("429 once the daily limit is used up", async () => {
+    const t = new EgressTunnel({ workers: [`http://127.0.0.1:${workerPort}`], token: TOKEN, usageFile: `${usageFile}.limit`, dailyLimit: 1 });
+    const via = new URL((await t.start()).url);
+    const a = `Basic ${Buffer.from(`${via.username}:${via.password}`).toString("base64")}`;
+    try {
+      const first = await connect({ "proxy-authorization": a }, via);
+      expect(first.status).toBe(200);
+      first.socket.destroy();
+      const second = await connect({ "proxy-authorization": a }, via);
+      expect(second.status).toBe(429);
+      second.socket.destroy();
+    } finally {
+      await t.close();
+    }
+    expect(JSON.parse(readFileSync(`${usageFile}.limit`, "utf8")).count).toBe(1);
   });
 });

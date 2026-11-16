@@ -69,6 +69,9 @@ export function createApp(connect: Connect) {
   const app = new Hono<{ Bindings: { EGRESS_TOKEN?: string } }>();
 
   app.get("/tunnel", async (c) => {
+    // The token is checked before anything else, so this handler answers 401 to any wrong or missing token.
+    // A live 400 for `Upgrade: websocket` without Sec-WebSocket-Key comes from Cloudflare's edge, which
+    // rejects malformed upgrade requests before the Worker runs; nothing below can produce a 400.
     if (!(await tokenOk(c.req.header("authorization"), c.env?.EGRESS_TOKEN))) return c.text("unauthorized", 401);
     if (c.req.header("upgrade")?.toLowerCase() !== "websocket") return c.text("websocket upgrade required", 426);
     const target = parseTarget(c.req.header("x-connect-host"));

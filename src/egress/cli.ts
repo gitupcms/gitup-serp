@@ -5,6 +5,7 @@ import { rmSync } from "node:fs";
 import { bundleWorker } from "./bundle.js";
 import { CloudflareApi } from "./cf.js";
 import { readEgressState, STATE_FILE, writeEgressState } from "./state.js";
+import { dailyLimit, readUsage } from "./usage.js";
 
 const PREFIX = "openserp-egress-";
 const workerName = (i: number) => `${PREFIX}${String(i).padStart(3, "0")}`;
@@ -23,7 +24,7 @@ async function up(n: number) {
   writeEgressState({ token, workers: prev?.workers ?? [] });
 
   const script = await bundleWorker();
-  const sub = await cf.getSubdomain();
+  const sub = await cf.ensureSubdomain();
   const workers: string[] = [];
   for (let i = 1; i <= n; i++) {
     const name = workerName(i);
@@ -57,6 +58,7 @@ async function ls() {
   for (const name of names) console.log(name);
   const state = readEgressState();
   console.error(`${names.length} deployed, ${state?.workers.length ?? 0} in ${STATE_FILE}`);
+  console.error(`today (UTC): ${readUsage()} of ${dailyLimit()} Worker requests`);
 }
 
 const [cmd, arg] = process.argv.slice(2);
