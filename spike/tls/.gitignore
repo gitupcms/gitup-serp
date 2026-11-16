@@ -1,0 +1,5 @@
+node_modules/
+.browsers/
+bin/
+.env
+results.json

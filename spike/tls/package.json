@@ -1,0 +1,21 @@
+{
+  "name": "tls",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "spike": "PLAYWRIGHT_BROWSERS_PATH=.browsers tsx --env-file-if-exists=.env spike.ts",
+    "setup": "mkdir -p bin && curl -sL https://github.com/lexiforest/curl-impersonate/releases/download/v2.3.2/curl-impersonate-v2.3.2.x86_64-linux-gnu.tar.gz | tar -xz -C bin && PLAYWRIGHT_BROWSERS_PATH=.browsers patchright install chromium"
+  },
+  "keywords": [],
+  "type": "module",
+  "devDependencies": {
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "cuimp": "^2.1.2",
+    "impit": "^0.14.9",
+    "patchright": "^1.64.3",
+    "undici": "^8.12.4"
+  }
+}
