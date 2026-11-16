@@ -44,7 +44,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] `AbortSignal` destekleniyor, temizlik ve kapanış düzgün yapılıyor.
 - [~] Consent seçicileri ve ısınma turu canlıda çalıştı, ancak başka diller ve ülkeler denenmedi.
 - [ ] `POOL_SIZE` > 1 canlıda denenecek. serpmaven'deki `--workers` (16'ya kadar) karşılığı.
-- [+] Tarayıcı her `BROWSER_MAX_PAGES` (varsayılan 50) sayfada aynı profil ve çerezlerle yeniden başlıyor, ardından 5-15 sn bekliyor. Restart sonrası çerezlerin korunduğu sahte Google'la denendi.
+- [+] Tarayıcı her `BROWSER_MAX_PAGES` (varsayılan 50) sayfada aynı profil ve çerezlerle yeniden başlıyor, ardından 5-15 sn bekliyor. Restart sonrası çerezlerin korunduğu sahte Google'la denendi. Canlıda da görüldü: yeniden başlatma 1,6 sn, ardından 11,6 sn bekleme. Chromium'un belleği yeniden başlatmadan sonra yaklaşık 1,5 GB'tan 0,9 GB'a indi (kaba ölçüm, 2 sn aralıklı RSS). Tarayıcı yalnızca HTTP denemesi tutmazsa açıldığı için 10 sorguda bir kez yeniden başladı.
 - [+] Çıkış başına en fazla sorgu sayısı: `EXIT_MAX_QUERIES` (varsayılan 300).
 - [ ] İlk sorguyu arama kutusuna yazarak yapma (serpmaven `_query`). Gerekirse eklenecek; şu an URL ile açılıyor.
 - [+] Alakasız ("zehirli") sayfa tespiti akışa bağlandı: bir çıkışın son 5 sayfasından 3'ü alakasızsa o çıkış bırakılıyor. Latin dışı alfabeler, tırnak ya da `site:` gibi operatörler içeren ve tek kelimelik sorgular hiç yargılanmıyor. Canlıda Türkçe, Japonca ve `site:` sorgularıyla 6/6 denendi, yanlış alarm çıkmadı.
@@ -70,7 +70,10 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] API `links` parametresi (varsayılan: hepsi, `0`: kapalı).
 - [+] Canlı: 33/33 link çözüldü.
 - [+] `links_wait` (API, `--links-wait`, MCP): S saniye sonra o ana kadar çözülen linklerle yanıt veriyor, kalan istekler iptal ediliyor. Canlıda `links_wait=8` ile 9 linkin 5'i çözüldü, sayfa 9,5 sn sürdü.
-- [~] Hız: bekletilen ("Verifying your request") linkler artık paralel yuvayı tutmuyor; `LINK_PARALLEL` ve `LINK_BUDGET_MS` ayarlanabiliyor. Canlıda belirgin bir hızlanma görülmedi: çoğu sayfa 16-26 sn sürdü, ama 60-93 sn süren aykırı sayfalar da oldu. Linklerin hepsi çözüldü. Zamanın nereye gittiğini görmek için sayfa başına zaman logu gerekiyor.
+- [~] Hız: ölçüldü (`search_metadata.timings`, 10 canlı sorgu, 10 link).
+  - Link çözme 9-25 sn sürüyor. Bunun neredeyse tamamı Google'ın "Verifying your request" bekletmesi: toplam bekletme süresi link süresinin 2-3 katı, yani bekletmeler artık üst üste biniyor. Bu süre Google'ın verdiği gecikme; daha fazla kısaltmanın yolu daha az link istemek ya da `links_wait`.
+  - 60-115 sn süren aykırı sayfaların nedeni link çözme değil. İlk sorguda çıkış `sorry` alıyor, sonra yeni kimlik ısınıyor: `queue` 67-74 sn.
+  - Sıradaki iyileştirme: ısınmayı ilk sorgudan önce bitirmek ve `sorry` sonrası yedek kimliği önceden hazır tutmak.
 
 ## 5. HTTP API (Hono)
 - [+] `GET /search.json` (`/search`): `q`, `pages`, `hl`, `gl`, `location` (uule), `tbs`, `cr`, `lr`, `links`, `async`.
@@ -101,7 +104,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 ## 8. Dağıtım ve işletim
 - [+] `npm run setup`: Chromium (`.browsers/`) ve curl-impersonate (`bin/`).
 - [+] `.env` ve `.env.example`; `npm start` `.env` dosyasını okuyor.
-- [+] Dockerfile: Node 22, Xvfb, tini, root olmayan kullanıcı, `HEALTHCHECK`, `/data` birimi. `docker run IMAGE cli|mcp|egress:*` çalışıyor. İmaj 2,1 GB ve yalnızca x86_64. Egress yoksa `/health` 503 döndüğü için konteyner `unhealthy` görünür.
+- [+] Dockerfile: Node 22, Xvfb, tini, root olmayan kullanıcı, `HEALTHCHECK`, `/data` birimi. `docker run IMAGE cli|mcp|egress:*` çalışıyor. İmaj 2,1 GB ve yalnızca x86_64. Egress yoksa `/health` 503 döndüğü için konteyner `unhealthy` görünür. Canlı uçtan uca deneme yapıldı: konteyner Cloudflare çıkışıyla arama yaptı (8 organik sonuç, 3/3 link, 9,5 sn), anahtarsız istek 401 aldı, Docker sağlık durumu `healthy` oldu. CI GitHub'da yeşil.
 - [+] CI (GitHub Actions): tip kontrolü, testler, Worker paketi ve ayrı bir `docker build` işi. Gizli anahtar kullanmıyor, canlı çağrı yapmıyor.
 - [+] README: kurulum, Cloudflare token adımları, API, CLI, MCP ve Docker örnekleri, kaynakça.
 - [+] İlk commit (`gitupcms/gitup-serp`).

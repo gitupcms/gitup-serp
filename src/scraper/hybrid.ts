@@ -47,6 +47,9 @@ export interface HttpSide {
   get(url: string, headers: Headers, signal?: AbortSignal): Promise<Fetched & { setCookies: string[] }>;
 }
 
+/** Milliseconds a results page spent on each side, added to by `Hybrid.fetch`. */
+export type PhaseMs = { fetch?: number; browser?: number };
+
 export interface Answer {
   fetched: Fetched;
   verdict: Verdict;
@@ -173,11 +176,13 @@ export class Hybrid {
     private readonly maxMisses = HTTP_MISSES,
   ) {}
 
-  async fetch(url: string, signal?: AbortSignal): Promise<Answer> {
+  /** `ms` gets the milliseconds spent on the HTTP try and the browser, added even when this throws. */
+  async fetch(url: string, signal?: AbortSignal, ms: PhaseMs = {}): Promise<Answer> {
     const headers = this.browser.headers;
     if (!this.browserOnly && headers) {
-      if (!this.cookie) this.cookie = await this.browser.cookies();
+      const t0 = performance.now();
       try {
+        if (!this.cookie) this.cookie = await this.browser.cookies();
         const r = await this.http.get(url, replayHeaders(headers, this.cookie), signal);
         this.cookie = foldCookies(this.cookie, r.setCookies);
         const verdict = classify(r.html, r.url, r.status ?? undefined);
@@ -188,17 +193,24 @@ export class Hybrid {
       } catch (err) {
         if (signal?.aborted) throw err;
         // Any other HTTP failure: the browser takes the query, as for a check page.
+      } finally {
+        ms.fetch = (ms.fetch ?? 0) + performance.now() - t0;
       }
       if (++this.misses >= this.maxMisses) this.browserOnly = true;
     }
     signal?.throwIfAborted();
-    // The HTTP side's cookies go back to the browser first, so both sides hold the same jar.
-    // shortcut: cookies the HTTP side deleted stay in the browser; port serpmaven's deletion list if Google starts relying on it.
-    if (this.cookie) await this.browser.setCookies(this.cookie);
-    const fetched = await this.browser.search(url);
-    const verdict = classify(fetched.html, fetched.url, fetched.status ?? undefined);
-    if (verdict.kind === "serp") this.cookie = await this.browser.cookies();
-    return { fetched, verdict, via: "browser" };
+    const t0 = performance.now();
+    try {
+      // The HTTP side's cookies go back to the browser first, so both sides hold the same jar.
+      // shortcut: cookies the HTTP side deleted stay in the browser; port serpmaven's deletion list if Google starts relying on it.
+      if (this.cookie) await this.browser.setCookies(this.cookie);
+      const fetched = await this.browser.search(url);
+      const verdict = classify(fetched.html, fetched.url, fetched.status ?? undefined);
+      if (verdict.kind === "serp") this.cookie = await this.browser.cookies();
+      return { fetched, verdict, via: "browser" };
+    } finally {
+      ms.browser = (ms.browser ?? 0) + performance.now() - t0;
+    }
   }
 
   /** One link lookup on this identity's HTTP client and cookies; redirects are not followed. */

@@ -2,7 +2,7 @@
 // Warm-up ported from serpmaven's warmup.py and scraper.py `_warm` (MIT).
 
 import { Browser, GOOGLE } from "./browser.js";
-import { type Answer, CurlHttp, Hybrid } from "./hybrid.js";
+import { type Answer, CurlHttp, Hybrid, type PhaseMs } from "./hybrid.js";
 import type { LinkAnswer } from "./links.js";
 import { newSessionId, type ProxyTemplate } from "./proxy.js";
 
@@ -24,7 +24,8 @@ export const DWELL_S = 10;
 export interface Identity {
   readonly session: string;
   readonly proxyHost: string | null;
-  fetch(url: string, signal?: AbortSignal): Promise<Answer>;
+  /** `ms` gets the HTTP and browser milliseconds (see `Hybrid.fetch`). */
+  fetch(url: string, signal?: AbortSignal, ms?: PhaseMs): Promise<Answer>;
   /** A result-link lookup on the same HTTP client; without it links are left unresolved. */
   lookup?(url: string, signal?: AbortSignal): Promise<LinkAnswer>;
   close(): Promise<void>;
@@ -58,7 +59,7 @@ export async function openIdentity(proxy: ProxyTemplate | null, opts: IdentityOp
     return {
       session,
       proxyHost: endpoint?.host ?? null,
-      fetch: (url, s) => hybrid.fetch(url, s),
+      fetch: (url, s, ms) => hybrid.fetch(url, s, ms),
       lookup: (url, s) => hybrid.lookup(url, s),
       close: () => browser.close(),
       get browserPages() {

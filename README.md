@@ -59,6 +59,8 @@ Parameters:
 | `links_wait` | Seconds to wait for links (0-120); answers with what was resolved by then. |
 | `async` | `true` returns an id right away. |
 
+Every record has `search_metadata.timings`, in ms: `queue`, `fetch`, `browser`, `links`, `links_held`, `links_lookups`, `exits`, `retries` and `total`.
+
 Pass the key as `Authorization: Bearer`; `?api_key=` is refused. Binding to anything other than loopback requires `OPENSERP_API_KEY`.
 
 ## CLI

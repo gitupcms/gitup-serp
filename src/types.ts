@@ -22,6 +22,24 @@ export interface SearchParams {
   links_wait?: number;
 }
 
+/** Integer milliseconds per phase of one results page, summed over the exits tried. */
+export interface Timings {
+  /** Waiting for a free identity, warm-up included. */
+  queue?: number;
+  /** The HTTP tries. */
+  fetch?: number;
+  /** Browser navigation. */
+  browser?: number;
+  /** Link resolution in all, its summed held waits and its lookup count. */
+  links?: number;
+  links_held?: number;
+  links_lookups?: number;
+  exits?: number;
+  /** Why each dropped exit was dropped: a refusal verdict, "poisoned" or "error". */
+  retries?: string[];
+  total: number;
+}
+
 export interface SerpRecord {
   search_metadata: {
     id: string;
@@ -31,6 +49,8 @@ export interface SerpRecord {
     google_url: string | null;
     page_verdict: VerdictKind | null;
     verdict_reason: string | null;
+    /** Where this page's time went; only the phases that happened. */
+    timings?: Timings;
   };
   search_parameters: SearchParams & { engine: "google"; device: "desktop" };
   exit?: Record<string, unknown>;

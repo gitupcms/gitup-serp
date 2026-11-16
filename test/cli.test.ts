@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { type Deps, main, parseSearchArgs, UsageError } from "../src/cli/index.js";
+import { type Deps, main, parseSearchArgs, phases, UsageError } from "../src/cli/index.js";
 import { answered, openWriter } from "../src/cli/output.js";
 import type { SearchParams, SerpRecord } from "../src/types.js";
 
@@ -236,5 +236,14 @@ describe("main", () => {
     expect(t.out()).toContain("✗ CF_ACCOUNT_ID is not set");
     expect(t.out()).not.toContain("very-secret-value");
     expect(t.out()).not.toContain("u:p@h");
+  });
+});
+
+describe("progress phases", () => {
+  it("shows the main phases in short form, only those that happened", () => {
+    expect(phases({ queue: 100, fetch: 1_200, links: 14_300, links_held: 9_000, links_lookups: 18, exits: 1, total: 15_700 })).toBe(
+      "queue 0.1s fetch 1.2s links 14.3s (held 9.0s, 18 lookups) exits 1",
+    );
+    expect(phases({ queue: 0, fetch: 300, browser: 2_000, exits: 2, retries: ["sorry"], total: 2_400 })).toBe("queue 0.0s fetch 0.3s browser 2.0s exits 2 retries sorry");
   });
 });

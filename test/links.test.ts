@@ -130,6 +130,16 @@ describe("fillLinks", () => {
     expect(f.waited[0]).toBeLessThanOrEqual(3500);
   });
 
+  it("reports the lookups sent and the time spent in held waits", async () => {
+    const f = fake({ [PING_B]: [ok(interstitial("BBB", 3))], "/goto?url=BBB": [redirect("https://bbb.example/page")] });
+    const rs = results("BBB");
+    const stats = await fillLinks(rs, PINGS, f.lookup, ORIGIN, undefined, { wait: () => sleep(30) });
+    expect(stats.lookups).toBe(2);
+    expect(stats.heldMs).toBeGreaterThanOrEqual(25);
+    expect(stats.heldMs).toBeLessThan(1_000);
+    expect(await fillLinks(results("AAA").map((r) => ({ ...r, link: "https://x.example/" })), {}, f.lookup, ORIGIN)).toEqual({ lookups: 0, heldMs: 0 });
+  });
+
   it("gives a link held again one more round, then leaves it null", async () => {
     const f = fake({
       [PING_A]: [ok(interstitial("AAA"))],
@@ -162,7 +172,7 @@ describe("fillLinks", () => {
   it("leaves a failed lookup null and carries on with the rest, never throwing", async () => {
     const f = fake({ [PING_B]: [ok(pingAnswer("https://bbb.example/"))] }); // AAA's lookup throws
     const rs = results("AAA", "BBB");
-    await expect(fillLinks(rs, PINGS, f.lookup, ORIGIN, undefined, { parallel: 1 })).resolves.toBeUndefined();
+    await expect(fillLinks(rs, PINGS, f.lookup, ORIGIN, undefined, { parallel: 1 })).resolves.toEqual({ lookups: 2, heldMs: 0 });
     expect(rs.map((r) => r.link)).toEqual([null, "https://bbb.example/"]);
   });
 
@@ -226,7 +236,9 @@ describe("fillLinks", () => {
   it("links_wait cuts the budget: links in by then are kept, the rest are aborted and stay null", async () => {
     expect(linkBudgetMs(undefined)).toBe(LINK_BUDGET_MS);
     expect(linkBudgetMs(2.5, 30_000)).toBe(2_500);
-    expect(linkBudgetMs(120, 30_000)).toBe(30_000);
+    expect(linkBudgetMs(60, 30_000)).toBe(60_000); // links_wait wins over the env budget, even above it
+    expect(linkBudgetMs(120, 30_000)).toBe(120_000);
+    expect(linkBudgetMs(500, 30_000)).toBe(120_000); // never past LINKS_WAIT_MAX_S
     const aborted: string[] = [];
     const lookup = (url: string, signal: AbortSignal) => {
       const t = new URL(url).searchParams.get("url")!;

@@ -9,17 +9,13 @@
 // A failed lookup leaves `link: null`; nothing here throws or turns itself off for later pages.
 
 import { setTimeout as sleep } from "node:timers/promises";
+import { LINKS_WAIT_MAX_S } from "../config.js";
 import type { OrganicResult } from "../parse/index.js";
 
-const envInt = (name: string, def: number): number => {
-  const n = Number(process.env[name]);
-  return Number.isInteger(n) && n > 0 ? n : def;
-};
-
-/** Lookups in flight at once for one page (`LINK_PARALLEL`). A held link waits without taking one. */
-export const PARALLEL = envInt("LINK_PARALLEL", 4);
-/** Milliseconds one page's lookups may take in all; what is still out then stays null (`LINK_BUDGET_MS`). */
-export const LINK_BUDGET_MS = envInt("LINK_BUDGET_MS", 30_000);
+/** Default lookups in flight at once for one page (`LINK_PARALLEL`). A held link waits without taking one. */
+export const PARALLEL = 4;
+/** Default milliseconds one page's lookups may take in all; what is still out then stays null (`LINK_BUDGET_MS`). */
+export const LINK_BUDGET_MS = 30_000;
 /** The longest "Verifying your request" delay worth waiting out, in seconds. */
 export const HELD_WAIT_MAX_S = 30;
 /** Times a held link is asked again before it is left empty. */
@@ -106,9 +102,15 @@ function tokenOf(link: string): string | null {
   }
 }
 
-/** The page's link budget for a request's `links_wait` (seconds): the smaller of the two. */
+/** The page's link budget: a request's `links_wait` (seconds, up to the max) when given, even above `budgetMs`. */
 export function linkBudgetMs(linksWaitS: number | undefined, budgetMs = LINK_BUDGET_MS): number {
-  return linksWaitS === undefined ? budgetMs : Math.min(budgetMs, Math.round(linksWaitS * 1000));
+  return linksWaitS === undefined ? budgetMs : Math.round(Math.min(linksWaitS, LINKS_WAIT_MAX_S) * 1000);
+}
+
+/** What one page's link resolution did: lookups sent and the milliseconds spent in held waits. */
+export interface FillStats {
+  lookups: number;
+  heldMs: number;
 }
 
 /**
@@ -116,7 +118,7 @@ export function linkBudgetMs(linksWaitS: number | undefined, budgetMs = LINK_BUD
  * `pings`, token to path), then the `/goto` itself, waiting out a held page. At most `parallel`
  * lookups run at once, all within `budgetMs`; a held page's wait does not count against `parallel`
  * and must end before the budget does. When the budget runs out the lookups still out are aborted. A sorry answer stops this page's lookups; an error
- * leaves that one result null. Resolves when every lookup has settled; never rejects.
+ * leaves that one result null. Resolves when every lookup has settled, with its stats; never rejects.
  */
 export async function fillLinks(
   results: OrganicResult[],
@@ -125,10 +127,11 @@ export async function fillLinks(
   origin: string,
   signal?: AbortSignal,
   opts: FillOptions = {},
-): Promise<void> {
+): Promise<FillStats> {
   const { budgetMs = LINK_BUDGET_MS, parallel = PARALLEL, wait = (ms, s) => sleep(ms, undefined, { signal: s }) } = opts;
+  const stats: FillStats = { lookups: 0, heldMs: 0 };
   const todo = results.filter((r) => r.link === null && r.redirect_link?.includes("/goto?"));
-  if (!todo.length || signal?.aborted) return;
+  if (!todo.length || signal?.aborted) return stats;
   const deadline = Date.now() + budgetMs;
   const timeout = AbortSignal.timeout(budgetMs);
   const page = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -148,6 +151,7 @@ export async function fillLinks(
     else await new Promise<void>((r) => queued.push(r));
     try {
       if (stopped || page.aborted) return null;
+      stats.lookups++;
       const a = await lookup(new URL(path, origin).href, page);
       if (!refused(a)) return a;
       stopped = true; // Google is refusing this exit: no more lookups for this page
@@ -183,7 +187,12 @@ export async function fillLinks(
         const askAt = hold ? Date.now() + hold[0] * 1000 + HELD_MARGIN_MS : 0;
         if (hold && hold[0] <= HELD_WAIT_MAX_S && held < HELD_ROUNDS && askAt < deadline) {
           held++;
-          await wait(askAt - Date.now(), page);
+          const t0 = performance.now();
+          try {
+            await wait(askAt - Date.now(), page);
+          } finally {
+            stats.heldMs += performance.now() - t0;
+          }
           next = hold[1];
           gotoAsked = true; // the held page reloads this result's own /goto
           continue;
@@ -200,4 +209,5 @@ export async function fillLinks(
       if (link) r.link = link;
     }),
   );
+  return stats;
 }

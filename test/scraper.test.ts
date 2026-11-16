@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import { gzipSync } from "node:zlib";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { type BrowserSide, CURL_BIN, CurlHttp, type Fetched, foldCookies, type Headers, Hybrid, type HttpSide, parseCurlOutput, replayHeaders } from "../src/scraper/hybrid.js";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { type BrowserSide, CURL_BIN, CurlHttp, type Fetched, foldCookies, type Headers, Hybrid, type HttpSide, parseCurlOutput, type PhaseMs, replayHeaders } from "../src/scraper/hybrid.js";
 import type { Identity } from "../src/scraper/identity.js";
-import { resultsUrl, Scraper, uule } from "../src/scraper/index.js";
+import { createScraper, resultsUrl, Scraper, uule } from "../src/scraper/index.js";
 import { ProxyTemplate, redact } from "../src/scraper/proxy.js";
 import type { SearchParams } from "../src/types.js";
 import { GOTO_B, NO_JS_PAGE, resultsPage, SORRY_PAGE } from "./fixtures/pages.js";
@@ -126,7 +126,7 @@ function pool(exits: string[]) {
       id: {
         session: `${exit}-${n++}`,
         proxyHost: "gate.example:8080",
-        fetch: (u: string, s?: AbortSignal) => hybrid.fetch(u, s),
+        fetch: (u: string, s?: AbortSignal, ms?: PhaseMs) => hybrid.fetch(u, s, ms),
         lookup: (u: string, s?: AbortSignal) => hybrid.lookup(u, s),
         close: async () => void (entry.closed = true),
         get browserPages() {
@@ -418,6 +418,52 @@ describe("Scraper", () => {
     expect(p.made).toHaveLength(1);
     expect(p.made[0]!.closed).toBe(false);
     await s.close();
+  });
+
+  it("records where the page's time went, only for the phases that happened", async () => {
+    fake.refused.add("bad");
+    const p = pool(["bad", "good"]);
+    const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0] });
+    const first = (await s.search(params())).search_metadata.timings!;
+    // Each exit tries HTTP first, then the browser; "bad" is sent to /sorry, "good" serves and resolves links.
+    expect(first).toMatchObject({ exits: 2, retries: ["sorry"], links_lookups: 1, links_held: 0 });
+    for (const k of ["queue", "fetch", "browser", "links", "total"] as const) expect(Number.isInteger(first[k]), k).toBe(true);
+    const second = (await s.search({ ...params("q2"), links: 0 })).search_metadata.timings!;
+    expect(Object.keys(second).sort()).toEqual(["exits", "fetch", "queue", "total"]); // served over HTTP, no links, no retries
+    expect(second.exits).toBe(1);
+    expect(second.total).toBeGreaterThanOrEqual(second.fetch!);
+    await s.close();
+  });
+
+  it("gives links_wait as the page's link budget, even above the env budget", async () => {
+    const p = pool(["good"]);
+    const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0], linkBudgetMs: 1, linkParallel: 1 });
+    const r = await s.search({ ...params(), links_wait: 10 });
+    expect((r.organic_results as { link: string | null }[])[2]!.link).toBe(`https://example.org/${GOTO_B}`);
+    await s.close();
+  });
+
+  it("logs a browser restart and an exit-cap retirement with why and how long", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      fake.httpCheck = true;
+      const p = pool(["one", "two"]);
+      const s = new Scraper({ poolSize: 1, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0], browserMaxPages: 1, exitMaxQueries: 2, settleMs: [0, 0] });
+      for (const q of ["a", "b", "c"]) await s.search(params(q));
+      await s.close();
+      const lines = err.mock.calls.map((c) => String(c[0]));
+      expect(lines).toContainEqual(expect.stringMatching(/^browser restart on one-0 after 1 pages \(BROWSER_MAX_PAGES\): \d+\.\ds, settling 0\.0s$/));
+      expect(lines).toContainEqual(expect.stringMatching(/^identity one-0 retired after 2 queries \(EXIT_MAX_QUERIES\): new identity two-1 ready in \d+\.\ds$/));
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("refuses bad LINK_PARALLEL and LINK_BUDGET_MS at startup", () => {
+    const env = { SCRAPER_PROXY: "http://gate.example:8080" };
+    for (const [k, v] of [["LINK_PARALLEL", "0"], ["LINK_PARALLEL", "two"], ["LINK_BUDGET_MS", "1.5"], ["LINK_BUDGET_MS", "-1"]]) {
+      expect(() => createScraper({ ...env, [k!]: v }), `${k}=${v}`).toThrow(new RegExp(`^invalid config: ${k}: `));
+    }
   });
 
   it("reports warming until an identity is ready", async () => {

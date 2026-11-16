@@ -10,7 +10,7 @@ import { parseArgs } from "node:util";
 import type { Runtime } from "../bootstrap.js";
 import { glSchema, hlSchema, linksWaitSchema, searchDefaults } from "../config.js";
 import { readEgressState, STATE_FILE } from "../egress/state.js";
-import type { SearchParams, SerpRecord } from "../types.js";
+import type { SearchParams, SerpRecord, Timings } from "../types.js";
 import { answered, FORMATS, type Format, openWriter, type Sink } from "./output.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -153,6 +153,17 @@ function errorRecord(params: SearchParams, error: string, seconds: number): Serp
   };
 }
 
+/** The main phases in short, e.g. `queue 0.1s fetch 1.2s links 14.3s (held 9.0s, 18 lookups) exits 1`. */
+export function phases(t: Timings): string {
+  const s = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+  const out: string[] = [];
+  for (const k of ["queue", "fetch", "browser"] as const) if (t[k] !== undefined) out.push(`${k} ${s(t[k])}`);
+  if (t.links !== undefined) out.push(`links ${s(t.links)} (held ${s(t.links_held ?? 0)}, ${t.links_lookups ?? 0} lookups)`);
+  if (t.exits !== undefined) out.push(`exits ${t.exits}`);
+  if (t.retries?.length) out.push(`retries ${t.retries.join(",")}`);
+  return out.join(" ");
+}
+
 async function search(args: string[], deps: Deps): Promise<number> {
   const opts = parseSearchArgs(args, deps.env);
   let queries = await readQueries(opts, deps);
@@ -193,7 +204,8 @@ async function search(args: string[], deps: Deps): Promise<number> {
       const organic = Array.isArray(record.organic_results) ? record.organic_results.length : 0;
       const status = record.search_metadata.status;
       writer.write(record);
-      deps.stderr(`${JSON.stringify(q)} page ${page}: ${status}, ${organic} organic, ${seconds}s\n`);
+      const t = record.search_metadata.timings;
+      deps.stderr(`${JSON.stringify(q)} page ${page}: ${status}, ${organic} organic, ${seconds}s${t ? ` (${phases(t)})` : ""}\n`);
       if (status !== "Success") {
         failed = true;
         return;
