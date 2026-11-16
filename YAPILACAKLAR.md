@@ -31,7 +31,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] 401/400 durumu canlıda doğrulandı. Yanlış token'la eksiksiz WebSocket isteği 401 alıyor. 400, `Sec-WebSocket-Key` eksik olduğunda isteği Cloudflare'in reddetmesinden geliyor, bizim koddan değil.
 - [+] Yük testi: 50 sorgu (CLI, link çözme kapalı) **50/50 başarılı**, hiç engel yok. Ortanca süre 5,2 sn, p90 6,6 sn. İlk sorgu ısınmayla birlikte 46 sn sürdü.
 - [ ] Daha büyük yük testi: 500+ sorgu ve `POOL_SIZE` > 1.
-- [ ] Birden çok Cloudflare hesabı: kota ve IP çeşitliliği için.
+- [ ] Birden çok Cloudflare hesabı: kota ve IP çeşitliliği için. İkinci bir hesap gerekiyor; şu an tek hesapla günde 100 bin istek fazlasıyla yetiyor.
 - [+] Çıkış ülkesi: Cloudflare'de seçilemiyor, ama artık gerek kalmadı. Varsayılan `DEFAULT_GL=us` ve `DEFAULT_HL=en`; `location` verilmezse gl ülkesi uule olarak gönderiliyor. Canlıda yerel paket artık doğru ülkeden geliyor: us için Colorado ve Missouri, tr için Gaziantep ve Bursa. Önceden Londra geliyordu. Şehir düzeyinde konum için `location` verilmeli.
 
 ## 2. Tarayıcı, kimlik ve hibrit akış
@@ -46,10 +46,10 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [ ] `POOL_SIZE` > 1 canlıda denenecek. serpmaven'deki `--workers` (16'ya kadar) karşılığı.
 - [+] Tarayıcı her `BROWSER_MAX_PAGES` (varsayılan 50) sayfada aynı profil ve çerezlerle yeniden başlıyor, ardından 5-15 sn bekliyor. Restart sonrası çerezlerin korunduğu sahte Google'la denendi. Canlıda da görüldü: yeniden başlatma 1,6 sn, ardından 11,6 sn bekleme. Chromium'un belleği yeniden başlatmadan sonra yaklaşık 1,5 GB'tan 0,9 GB'a indi (kaba ölçüm, 2 sn aralıklı RSS). Tarayıcı yalnızca HTTP denemesi tutmazsa açıldığı için 10 sorguda bir kez yeniden başladı.
 - [+] Çıkış başına en fazla sorgu sayısı: `EXIT_MAX_QUERIES` (varsayılan 300).
-- [ ] İlk sorguyu arama kutusuna yazarak yapma (serpmaven `_query`). Gerekirse eklenecek; şu an URL ile açılıyor.
+- [-] İlk sorguyu arama kutusuna yazarak yapma (serpmaven `_query`): yapılmadı. URL ile açmak canlıda sorun çıkarmadı; engel oranı artarsa yeniden bakılır.
 - [+] Alakasız ("zehirli") sayfa tespiti akışa bağlandı: bir çıkışın son 5 sayfasından 3'ü alakasızsa o çıkış bırakılıyor. Latin dışı alfabeler, tırnak ya da `site:` gibi operatörler içeren ve tek kelimelik sorgular hiç yargılanmıyor. Canlıda Türkçe, Japonca ve `site:` sorgularıyla 6/6 denendi, yanlış alarm çıkmadı.
-- [ ] HTTP tarafında silinen çerezlerin tarayıcıya da yansıtılması.
-- [ ] Header'ları NetLog'dan kaydetme: şu an CDP'den alınıyor, sıra bir miktar farklı olabilir.
+- [-] HTTP tarafında silinen çerezlerin tarayıcıya da yansıtılması: yapılmadı. Google canlıda çerez silmedi; her yeniden başlatmada çerezler zaten yeniden kopyalanıyor.
+- [-] Header'ları NetLog'dan kaydetme: yapılmadı. CDP'den alınan header'larla HTTP denemeleri canlıda geçiyor (her sorguda fetch yaklaşık 1,2 sn, ek engel yok).
 
 ## 3. Ayrıştırma ve sınıflandırma
 - [+] Organik sonuçlar, reklamlar, "People also ask", ilgili aramalar, sayfalama, AI Overview, yerel sonuçlar, sonuç sayısı.
@@ -61,7 +61,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [~] Yabancı dillerdeki engel ve AI Overview metinleri tahmine dayalı, canlıda doğrulanmadı.
 - [+] Reklamlar: seçicide hata yokmuş, sorun `gl` verilmemesiymiş. `gl=us` ile 8 ticari sorgunun 3'ünde 2'şer üst reklam geldi ve doğru ayrıştırıldı.
 - [+] Gerçek Google HTML örnekleri (`test/fixtures/*.html.gz`, `test/fixtures.test.ts`): reklam, yerel paket ve AI Overview içeren 3 sayfa.
-- [ ] Günlük canlı kontrol: Google HTML yapısını değiştirince haber verecek bir canary testi.
+- [+] Günlük canlı kontrol: `npm run canary` (6 sorgu: reklam, yerel paket, organik, AI Overview, Türkçe, Japonca) ve `.github/workflows/canary.yml`. Workflow her gün çalışır ama yalnızca repo secrets'ta `CF_API_TOKEN` ve `CF_ACCOUNT_ID` varsa; ayrı bir Worker öneki (`EGRESS_PREFIX=openserp-canary`) kullandığı için senin Workers'ına dokunmaz. Canlıda yerelde çalıştırıldı ve 15 kontrolün 15'i geçti.
 - [+] Yerel sonuçların ve reklamların canlıda kontrolü (fixture'lara bakın).
 
 ## 4. Link çözme
@@ -70,6 +70,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] API `links` parametresi (varsayılan: hepsi, `0`: kapalı).
 - [+] Canlı: 33/33 link çözüldü.
 - [+] `links_wait` (API, `--links-wait`, MCP): S saniye sonra o ana kadar çözülen linklerle yanıt veriyor, kalan istekler iptal ediliyor. Canlıda `links_wait=8` ile 9 linkin 5'i çözüldü, sayfa 9,5 sn sürdü.
+- [+] Yedek kimlik (`SPARE_IDENTITIES`, varsayılan 1): bir çıkış reddedilince önceden ısınmış yedek hemen devreye giriyor, yeni yedek arka planda ısınıyor. Canary'de ilk sorgu 40,5 sn sürdü; önceden 110 sn sürüyordu. Ancak bu çalıştırmada `sorry` gelmediği için 40,5 sn, yedeğin değil normal ısınmanın süresi.
 - [~] Hız: ölçüldü (`search_metadata.timings`, 10 canlı sorgu, 10 link).
   - Link çözme 9-25 sn sürüyor. Bunun neredeyse tamamı Google'ın "Verifying your request" bekletmesi: toplam bekletme süresi link süresinin 2-3 katı, yani bekletmeler artık üst üste biniyor. Bu süre Google'ın verdiği gecikme; daha fazla kısaltmanın yolu daha az link istemek ya da `links_wait`.
   - 60-115 sn süren aykırı sayfaların nedeni link çözme değil. İlk sorguda çıkış `sorry` alıyor, sonra yeni kimlik ısınıyor: `queue` 67-74 sn.
@@ -83,7 +84,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Kuyruk dolunca 429, zaman aşımında 504. Hız sınırı uygulanıyor. Loglara sorgu yazılmıyor.
 - [+] `X-Forwarded-For` desteği, `TRUST_PROXY` ayarıyla açılıyor.
 - [+] Çok sayfalı isteklerde her sayfaya ayrı arşiv kimliği veriliyor; birleşik sonuç istek kimliğinde duruyor.
-- [ ] OpenAPI ya da şema dokümanı.
+- [+] `GET /openapi.json` (OpenAPI 3.1). Parametreler aynı zod şemasından üretildiği için kodla uyumsuz hale gelemez.
 
 ## 6. CLI (serpmaven `search`)
 - [+] `npm run cli -- search "sorgu"`: sorgular argümandan, `--input` dosyasından ya da stdin'den okunabiliyor.

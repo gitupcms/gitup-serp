@@ -7,7 +7,9 @@ import { CloudflareApi } from "./cf.js";
 import { readEgressState, STATE_FILE, writeEgressState } from "./state.js";
 import { dailyLimit, readUsage } from "./usage.js";
 
-const PREFIX = "openserp-egress-";
+// up and down replace every Worker with this prefix; CI uses its own so it can't remove yours.
+const PREFIX = `${process.env.EGRESS_PREFIX || "openserp-egress"}-`;
+if (!/^[a-z0-9][a-z0-9-]{0,40}-$/.test(PREFIX)) throw new Error("EGRESS_PREFIX: lowercase letters, digits and dashes only");
 const workerName = (i: number) => `${PREFIX}${String(i).padStart(3, "0")}`;
 
 function api(): CloudflareApi {

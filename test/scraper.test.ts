@@ -479,6 +479,85 @@ describe("Scraper", () => {
   });
 });
 
+describe("spare identities", () => {
+  /** `p.makeIdentity` where the calls numbered in `held` wait for `open()`; the rest go through at once. */
+  function gated(p: ReturnType<typeof pool>, held: (call: number) => boolean) {
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let calls = 0;
+    const makeIdentity = async () => {
+      if (held(calls++)) await gate;
+      return p.makeIdentity();
+    };
+    return { makeIdentity, open, calls: () => calls };
+  }
+  const h = (s: Scraper) => s.health() as { spares?: number; ready?: number };
+  const until = async (ok: () => boolean) => {
+    while (!ok()) await new Promise((r) => setTimeout(r, 1));
+  };
+
+  it("swaps a refused identity for the warmed spare without waiting, then warms a new spare", async () => {
+    fake.refused.add("bad");
+    const p = pool(["bad", "good"]);
+    const g = gated(p, (n) => n >= 2);
+    const s = new Scraper({ poolSize: 1, spares: 1, makeIdentity: g.makeIdentity, origin: base, gapMs: [0, 0] });
+    await until(() => h(s).spares === 1 && h(s).ready === 1);
+    const r = await s.search(params());
+    expect(r.search_metadata.status).toBe("Success");
+    expect(r.exit).toMatchObject({ session: "good-1" });
+    expect(r.search_metadata.timings?.retries).toEqual(["sorry"]);
+    expect(g.calls()).toBe(3); // only the new spare, no warm-up in the slot
+    expect(s.health()).toMatchObject({ state: "ok", spares: 0 });
+    g.open();
+    await until(() => h(s).spares === 1);
+    expect(p.made.map((m) => m.closed)).toEqual([true, false, false]);
+    await s.close();
+  });
+
+  it("does not hand out a spare still warming", async () => {
+    fake.refused.add("bad");
+    const p = pool(["bad", "good"]);
+    const g = gated(p, (n) => n === 1); // the first spare
+    const s = new Scraper({ poolSize: 1, spares: 1, makeIdentity: g.makeIdentity, origin: base, gapMs: [0, 0] });
+    const r = await s.search(params());
+    expect(r.exit).toMatchObject({ session: "good-1" }); // warmed in the slot, not the held spare
+    expect(h(s).spares).toBe(0);
+    expect(g.calls()).toBe(3); // no second spare while one is warming
+    g.open();
+    await until(() => h(s).spares === 1);
+    await s.close();
+  });
+
+  it("keeps the old behaviour with spares 0", async () => {
+    fake.refused.add("bad");
+    const p = pool(["bad", "good"]);
+    const s = new Scraper({ poolSize: 1, spares: 0, makeIdentity: p.makeIdentity, origin: base, gapMs: [0, 0] });
+    const r = await s.search(params());
+    expect(r.exit).toMatchObject({ session: "good-1" });
+    expect(p.made).toHaveLength(2);
+    expect(s.health()).toMatchObject({ state: "ok", spares: 0 });
+    await s.close();
+  });
+
+  it("closes spares on close(), including one that finishes warming afterwards", async () => {
+    const p = pool(["good"]);
+    const g = gated(p, (n) => n === 2);
+    const s = new Scraper({ poolSize: 1, spares: 2, makeIdentity: g.makeIdentity, origin: base, gapMs: [0, 0] });
+    await until(() => h(s).spares === 1);
+    const closing = s.close();
+    g.open();
+    await closing;
+    expect(p.made).toHaveLength(3);
+    expect(p.made.every((m) => m.closed)).toBe(true);
+  });
+
+  it("refuses a bad SPARE_IDENTITIES at startup", () => {
+    for (const v of ["-1", "1.5", "one"]) {
+      expect(() => createScraper({ SCRAPER_PROXY: "http://gate.example:8080", SPARE_IDENTITIES: v }), v).toThrow(/^invalid config: SPARE_IDENTITIES: /);
+    }
+  });
+});
+
 // A real headful patchright Chromium against the fake Google; opens a window.
 describe.skipIf(!process.env.RUN_BROWSER_TESTS)("real browser (RUN_BROWSER_TESTS=1)", () => {
   it("captures headers, searches and shares cookies", async () => {

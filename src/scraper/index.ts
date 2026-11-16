@@ -39,6 +39,8 @@ export interface ScraperOptions {
   linkParallel?: number;
   /** Link budget per page when the request gives no `links_wait` (`LINK_BUDGET_MS`). */
   linkBudgetMs?: number;
+  /** Warm identities kept ready beyond the pool to replace a retired one at once (`SPARE_IDENTITIES`); 0 off. */
+  spares?: number;
 }
 
 interface Slot {
@@ -150,6 +152,9 @@ export class Scraper implements Searcher {
   private readonly closing = new AbortController();
   private readonly warming = new Set<Promise<void>>();
   private readonly upkeeps = new Set<Promise<void>>();
+  /** Warmed spares; one still warming is only in `warming` and never handed out. */
+  private readonly spares: Identity[] = [];
+  private sparesWarming = 0;
   private waiters = new Set<() => void>();
   private refusedInRow = 0;
   private downReason: string | null = null;
@@ -162,12 +167,13 @@ export class Scraper implements Searcher {
     this.gapMs = opts.gapMs ?? GAP_MS;
     this.slots = Array.from({ length: opts.poolSize }, () => ({ identity: null, busy: false, queries: 0, lastPageAt: 0, lowRelevance: [] }));
     for (const slot of this.slots) this.warm(slot);
+    this.refillSpares();
   }
 
   health() {
     if (this.downReason) return { state: "down" as const, reason: this.downReason };
     const ready = this.slots.filter((s) => s.identity);
-    const info = { pool: this.slots.length, ready: ready.length };
+    const info = { pool: this.slots.length, ready: ready.length, spares: this.spares.length };
     if (!ready.length) return { state: "warming" as const, ...info };
     if (ready.every((s) => s.busy)) return { state: "busy" as const, ...info };
     return { state: "ok" as const, ...info };
@@ -287,7 +293,7 @@ export class Scraper implements Searcher {
     this.closing.abort(new Error("scraper closed"));
     this.notify();
     await Promise.allSettled([...this.warming, ...this.upkeeps]);
-    await Promise.allSettled(this.slots.map((s) => s.identity?.close()));
+    await Promise.allSettled([...this.slots.map((s) => s.identity?.close()), ...this.spares.splice(0).map((i) => i.close())]);
     for (const s of this.slots) s.identity = null;
   }
 
@@ -332,12 +338,44 @@ export class Scraper implements Searcher {
     for (const w of ws) w();
   }
 
-  /** Drop an identity and warm a new one in its slot; `failed` counts it towards the breaker, `why` is logged once it is ready. */
+  /**
+   * Drop an identity; a warmed spare takes its slot at once, else a new one warms there.
+   * `failed` counts it towards the breaker, `why` is logged once the new one is ready.
+   */
   private retire(slot: Slot, identity: Identity, failed = true, why?: string): void {
     if (slot.identity === identity) slot.identity = null;
     identity.close().catch((err) => console.error(`closing identity ${identity.session}: ${message(err)}`));
     if (failed) this.failed();
-    this.warm(slot, why);
+    const spare = this.downReason || this.closing.signal.aborted ? undefined : this.spares.shift();
+    if (spare) {
+      Object.assign(slot, { identity: spare, queries: 0, lastPageAt: 0, lowRelevance: [] });
+      if (why) console.error(`${why}: spare identity ${spare.session} took its place`);
+      this.notify();
+    } else this.warm(slot, why);
+    this.refillSpares();
+  }
+
+  /**
+   * Warm spares up to `spares`. They take no queries and a failed warm-up does not count towards
+   * the breaker; it is retried at the next retire, not in a loop.
+   */
+  private refillSpares(): void {
+    while (this.spares.length + this.sparesWarming < (this.opts.spares ?? 0) && !this.downReason && !this.closing.signal.aborted) {
+      this.sparesWarming++;
+      const job = (async () => {
+        try {
+          const identity = await this.opts.makeIdentity(this.closing.signal);
+          if (this.closing.signal.aborted || this.downReason) return void (await identity.close());
+          this.spares.push(identity);
+        } catch (err) {
+          if (!this.closing.signal.aborted) console.error(`spare warm-up failed: ${message(err)}`);
+        }
+      })().finally(() => {
+        this.sparesWarming--;
+        this.warming.delete(job);
+      });
+      this.warming.add(job);
+    }
   }
 
   /**
@@ -414,6 +452,7 @@ const scraperEnv = z.object({
   EXIT_MAX_QUERIES: z.coerce.number().int().min(0).default(EXIT_MAX_QUERIES),
   LINK_PARALLEL: z.coerce.number().int().min(1).default(PARALLEL),
   LINK_BUDGET_MS: z.coerce.number().int().min(1).default(LINK_BUDGET_MS),
+  SPARE_IDENTITIES: z.coerce.number().int().min(0).default(1),
 });
 
 /** The real scraper from the environment; throws with a readable message on a bad setting. */
@@ -430,7 +469,8 @@ export function createScraper(env: NodeJS.ProcessEnv = process.env): { scraper: 
     exitMaxQueries: cfg.EXIT_MAX_QUERIES,
     linkParallel: cfg.LINK_PARALLEL,
     linkBudgetMs: cfg.LINK_BUDGET_MS,
+    spares: cfg.SPARE_IDENTITIES,
     makeIdentity: (signal) => openIdentity(proxy, { dwellS: cfg.WARMUP_DWELL_S }, signal),
   });
-  return { scraper, describe: `proxy ${proxy.describe()}, pool ${cfg.POOL_SIZE}` };
+  return { scraper, describe: `proxy ${proxy.describe()}, pool ${cfg.POOL_SIZE}, spares ${cfg.SPARE_IDENTITIES}` };
 }

@@ -1,0 +1,59 @@
+name: canary
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # `secrets` can't be read in a job-level `if`, so a tiny job reports whether they exist.
+  secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CF_API_TOKEN" ] && [ -n "$CF_ACCOUNT_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::CF_API_TOKEN or CF_ACCOUNT_ID not set; skipping the canary"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  canary:
+    needs: secrets
+    if: needs.secrets.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      # Its own Worker names, so the teardown never touches the Workers you run yourself.
+      EGRESS_PREFIX: openserp-canary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run setup
+      - run: xvfb-run npm run egress:up -- 2
+      - run: xvfb-run npm run canary -- --save canary-pages
+      - name: Upload failing pages
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-pages
+          path: canary-pages
+          if-no-files-found: ignore
+      - name: Tear down egress
+        if: always()
+        run: npm run egress:down

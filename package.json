@@ -11,6 +11,7 @@
     "start": "tsx --env-file-if-exists=.env src/index.ts",
     "cli": "tsx --env-file-if-exists=.env src/cli/index.ts",
     "mcp": "tsx --env-file-if-exists=.env src/mcp/index.ts",
+    "canary": "tsx --env-file-if-exists=.env src/cli/canary.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc --noEmit -p worker",
     "egress:up": "tsx --env-file-if-exists=.env src/egress/cli.ts up",

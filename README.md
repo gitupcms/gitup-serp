@@ -63,6 +63,8 @@ Every record has `search_metadata.timings`, in ms: `queue`, `fetch`, `browser`, 
 
 Pass the key as `Authorization: Bearer`; `?api_key=` is refused. Binding to anything other than loopback requires `OPENSERP_API_KEY`.
 
+`GET /openapi.json` serves an OpenAPI 3.1 document for these routes: the parameters with their limits, the record shape and the error responses. It needs no key but counts against the rate limit.
+
 ## CLI
 
 ```bash
@@ -71,6 +73,17 @@ npm run cli -- search --input queries.txt --output out.jsonl --resume
 ```
 
 `npm link` puts the same CLI on your PATH as `gitup-serp`.
+
+## Canary
+
+```bash
+npm run canary                      # needs egress (npm run egress:up or SCRAPER_PROXY)
+npm run canary -- --save pages/     # keep the HTML of failing pages, to turn into a fixture
+```
+
+Six live queries: two commercial, `pizza near me`, `hono framework`, one Turkish and one Japanese. Each must come back with verdict `serp` and at least 5 organic results, and `pizza near me` with a local pack. Ads and AI Overview don't show every time, so ads need to appear on at least one of the two commercial queries, and AI Overview is only reported (`-` line), never a failure. Exit code: 0 all pass, 1 any fail, 2 no egress.
+
+`.github/workflows/canary.yml` runs it daily and on demand when the `CF_API_TOKEN` and `CF_ACCOUNT_ID` secrets are set, skips otherwise, and uploads failing pages as an artifact.
 
 ## MCP
 
@@ -102,6 +115,8 @@ All optional, in `.env`:
 | --- | --- | --- |
 | `DEFAULT_GL`, `DEFAULT_HL` | `us`, `en` | Used when a query gives no `gl`/`hl`. Set `DEFAULT_GL=` to send none. |
 | `POOL_SIZE` | 1 | Parallel browser identities. |
+| `SPARE_IDENTITIES` | 1 | Warm identities kept ready to replace a refused one at once (one extra browser each). |
+| `EGRESS_PREFIX` | `openserp-egress` | Worker name prefix; `egress:up`/`down` replace every Worker with it. |
 | `BROWSER_MAX_PAGES` | 50 | Restart the browser after this many pages (0 = never). |
 | `EXIT_MAX_QUERIES` | 300 | Take a new exit session after this many queries (0 = never). |
 | `TRUST_PROXY` | off | Rate-limit by the first `X-Forwarded-For` address. Only behind a proxy that overwrites that header. |

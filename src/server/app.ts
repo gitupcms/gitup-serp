@@ -4,6 +4,7 @@ import type { HttpBindings } from "@hono/node-server";
 import { z } from "zod";
 import { type Config, glSchema, hlSchema, linksWaitSchema } from "../config.js";
 import type { SearchParams, Searcher, SerpRecord } from "../types.js";
+import { openapiDoc } from "./openapi.js";
 import { JobTimeoutError, Queue, QueueFullError } from "./queue.js";
 
 const ARCHIVE_SIZE = 500;
@@ -62,7 +63,7 @@ class RateLimiter {
 const sha = (s: string) => createHash("sha256").update(s).digest();
 const optional = z.string().trim().max(256).optional();
 
-function querySchema(maxPages: number) {
+export function querySchema(maxPages: number) {
   return z.object({
     q: z.string({ error: "q is required" }).trim().min(1, "q is required").max(2048),
     pages: z.coerce
@@ -105,6 +106,7 @@ export function createApp(
   const limiter = new RateLimiter(cfg.RATE_PER_MIN);
   const schema = querySchema(cfg.MAX_PAGES);
   const keyHash = cfg.OPENSERP_API_KEY ? sha(cfg.OPENSERP_API_KEY) : undefined;
+  const doc = openapiDoc(schema);
 
   // Path only: the query string may carry search terms.
   app.use(async (c, next) => {
@@ -135,7 +137,8 @@ export function createApp(
       c.header("Retry-After", String(wait));
       return c.json({ error: "rate limit exceeded" }, 429);
     }
-    if (keyHash) {
+    // The OpenAPI document holds no data: rate-limited, but open.
+    if (keyHash && c.req.path !== "/openapi.json") {
       const header = c.req.header("Authorization") ?? "";
       const given = header.startsWith("Bearer ") ? header.slice(7) : "";
       if (!timingSafeEqual(sha(given), keyHash)) return c.json({ error: "missing or wrong API key" }, 401);
@@ -187,6 +190,7 @@ export function createApp(
     }
   };
 
+  app.get("/openapi.json", (c) => c.json(doc));
   app.get("/search.json", search);
   app.get("/search", search);
 
@@ -197,7 +201,7 @@ export function createApp(
     return c.json(body);
   });
 
-  app.notFound((c) => c.json({ error: "use /search.json?q=..., /searches/<id>.json or /health" }, 404));
+  app.notFound((c) => c.json({ error: "use /search.json?q=..., /searches/<id>.json, /openapi.json or /health" }, 404));
 
   return app;
 }

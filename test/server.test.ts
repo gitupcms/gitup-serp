@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Config } from "../src/config.js";
-import { createApp } from "../src/server/app.js";
+import { createApp, querySchema } from "../src/server/app.js";
 import type { SearchParams, Searcher, SerpRecord } from "../src/types.js";
 
 const KEY = "secret-key";
@@ -214,5 +214,29 @@ describe("/health", () => {
   });
   it("is 503 unless ok", async () => {
     expect((await make(new Fake(0, "down")).request("/health")).status).toBe(503);
+  });
+});
+
+describe("openapi", () => {
+  it("is served without auth and lists every query param with its limits", async () => {
+    const res = await make().request("/openapi.json");
+    expect(res.status).toBe(200);
+    const doc = JSON.parse(await res.text());
+    expect(doc.openapi).toBe("3.1.0");
+    const params = doc.paths["/search.json"].get.parameters as { name: string; required: boolean; schema: Record<string, unknown> }[];
+    expect(params.map((p) => p.name).sort()).toEqual(Object.keys(querySchema(3).shape).sort());
+    const by = Object.fromEntries(params.map((p) => [p.name, p]));
+    expect(by.q).toMatchObject({ required: true, schema: { maxLength: 2048 } });
+    expect(by.pages!.schema).toMatchObject({ minimum: 1, maximum: base.MAX_PAGES });
+    expect(by.links_wait!.schema).toMatchObject({ minimum: 0, maximum: 120 });
+    expect(by.hl!.required).toBe(false);
+    expect(doc.components.schemas.Record.properties.search_metadata.properties.timings).toBeTruthy();
+    expect(Object.keys(doc.paths["/search.json"].get.responses)).toEqual(expect.arrayContaining(["400", "401", "429", "504"]));
+  });
+
+  it("still goes through the rate limiter", async () => {
+    const app = make(new Fake(), { RATE_PER_MIN: 1 });
+    expect((await app.request("/openapi.json")).status).toBe(200);
+    expect((await app.request("/openapi.json")).status).toBe(429);
   });
 });
