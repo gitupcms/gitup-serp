@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # Offline: curl-impersonate and browser tests skip themselves without `npm run setup`.
+      - run: npx vitest run
+      - name: Bundle worker
+        run: npx tsx -e "import('./src/egress/bundle.ts').then(m=>m.bundleWorker()).then(s=>{if(!s.includes('cloudflare:sockets'))process.exit(1)})"
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t gitup-serp .

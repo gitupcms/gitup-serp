@@ -88,7 +88,7 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [+] Paralellik `POOL_SIZE` ile ayarlanıyor. İlerleme stderr'e yazılıyor. Çıkış kodları: 0, 1, 2, Ctrl-C'de 130.
 - [+] `doctor`: Node, curl-impersonate, Chromium, ekran ve egress kontrol ediliyor. Token değerleri gösterilmiyor.
 - [+] Canlı: 50 sorgu CLI ile çalıştı.
-- [ ] `bin` girdisi (`gitup-serp`) PATH'te tsx gerektiriyor. Küçük bir JS sarmalayıcı yazılacak.
+- [+] `bin` girdisi (`gitup-serp`): `cli.mjs` sarmalayıcısı yereldeki tsx'i çalıştırıyor, PATH'te tsx gerekmiyor.
 - [ ] `--hl` ve `--gl` doğrulaması.
 - [-] `login` / `logout` (NodeMaven): kullanılmıyor, yerine `egress:*` komutları var.
 
@@ -101,8 +101,8 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 ## 8. Dağıtım ve işletim
 - [+] `npm run setup`: Chromium (`.browsers/`) ve curl-impersonate (`bin/`).
 - [+] `.env` ve `.env.example`; `npm start` `.env` dosyasını okuyor.
-- [ ] Dockerfile: Node, Xvfb, tini, root olmayan kullanıcı, `HEALTHCHECK`.
-- [ ] CI (GitHub Actions): tip kontrolü, testler, Worker paketi.
+- [+] Dockerfile: Node 22, Xvfb, tini, root olmayan kullanıcı, `HEALTHCHECK`, `/data` birimi. `docker run IMAGE cli|mcp|egress:*` çalışıyor. İmaj 2,1 GB ve yalnızca x86_64. Egress yoksa `/health` 503 döndüğü için konteyner `unhealthy` görünür.
+- [+] CI (GitHub Actions): tip kontrolü, testler, Worker paketi ve ayrı bir `docker build` işi. Gizli anahtar kullanmıyor, canlı çağrı yapmıyor.
 - [~] README: kısa kurulum ve kaynakça var. Cloudflare token adımları ve API örnekleri eksik.
 - [+] İlk commit (`gitupcms/gitup-serp`).
 

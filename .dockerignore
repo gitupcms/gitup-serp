@@ -1,0 +1,9 @@
+node_modules
+.browsers
+bin
+.env
+.openserp
+.orkestra
+graphify-out
+spike
+.git
