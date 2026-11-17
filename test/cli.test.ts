@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { type Deps, main, parseSearchArgs, phases, UsageError } from "../src/cli/index.js";
 import { answered, openWriter } from "../src/cli/output.js";
+import { NO_EGRESS } from "../src/extract/index.js";
 import type { SearchParams, SerpRecord } from "../src/types.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "cli-test-"));
@@ -131,6 +132,14 @@ describe("parseSearchArgs", () => {
     expect(parseSearchArgs(["q", "--links-wait", "0"]).links_wait).toBe(0);
     expect(parseSearchArgs(["q"]).links_wait).toBeUndefined();
     expect(() => parseSearchArgs(["q", "--links-wait", "121"])).toThrow("links_wait must be between 0 and 120");
+  });
+
+  it("maps --date onto tbs and takes --format markdown", () => {
+    expect(parseSearchArgs(["q", "--date", "m"]).tbs).toBe("qdr:m");
+    expect(parseSearchArgs(["q", "--date", "20240101..20240102"]).tbs).toBe("cdr:1,cd_min:1/1/2024,cd_max:1/2/2024");
+    expect(parseSearchArgs(["q"]).tbs).toBeUndefined();
+    expect(() => parseSearchArgs(["q", "--date", "z"])).toThrow(/^date must be/);
+    expect(parseSearchArgs(["q", "--format", "markdown"]).format).toBe("markdown");
   });
 
   it("gives hl/gl errors the API's messages and DEFAULT_* fills them in", () => {
@@ -277,6 +286,33 @@ describe("main", () => {
     };
     expect(await main(["search", "a"], deps)).toBe(1);
   });
+
+  it("search --extract N attaches pages (no egress here: the error) and raises --links", async () => {
+    const t = fakeDeps();
+    expect(await main(["search", "a", "--links", "0", "--extract", "1"], t.deps)).toBe(0);
+    expect(t.calls[0]!.links).toBe(1);
+    const r = JSON.parse(t.out());
+    expect(r.organic_results[0].extracted).toEqual({ markdown: "", error: NO_EGRESS });
+  });
+
+  it("extract prints markdown, or JSON, and exits 1 when a page failed", async () => {
+    const t = fakeDeps();
+    expect(await main(["extract", "https://a.example/"], t.deps)).toBe(1);
+    expect(t.out()).toBe(`Error: ${NO_EGRESS}\n`);
+    expect(t.err()).toContain(`https://a.example/: ${NO_EGRESS}`);
+    expect(t.closed()).toBe(true);
+    const j = fakeDeps();
+    await main(["extract", "https://a.example/", "https://b.example/", "--format", "json"], j.deps);
+    expect(JSON.parse(j.out()).map((p: { url: string }) => p.url)).toEqual(["https://a.example/", "https://b.example/"]);
+  });
+
+  it.each([[["extract"]], [["extract", "ftp://a.example/"]], [["extract", "https://a.example/", "--format", "csv"]], [["search", "q", "--extract", "6"]]])(
+    "refuses %j with exit 2",
+    async (argv) => {
+      const t = fakeDeps();
+      expect(await main(argv, t.deps)).toBe(2);
+    },
+  );
 
   it("usage errors exit 2", async () => {
     const t = fakeDeps();

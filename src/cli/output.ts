@@ -1,6 +1,7 @@
 // Writers for CLI output and `answered()` for --resume. Ported from serpmaven's output.py (MIT).
 
 import { readFileSync, truncateSync } from "node:fs";
+import { render } from "../render.js";
 import type { SerpRecord } from "../types.js";
 
 /** Where a writer puts text: process.stdout.write or a synchronous file write. */
@@ -23,7 +24,7 @@ export const ORGANIC_COLUMNS = [
   "snippet",
 ] as const;
 
-export const FORMATS = ["jsonl", "json", "csv"] as const;
+export const FORMATS = ["jsonl", "json", "csv", "markdown"] as const;
 export type Format = (typeof FORMATS)[number];
 
 /** One record per line, written as it arrives, so a killed run keeps what it already paid for. */
@@ -58,8 +59,20 @@ function csv(sink: Sink): Writer {
   };
 }
 
+/** Each record rendered as it arrives, a blank line between them. */
+function markdown(sink: Sink): Writer {
+  let first = true;
+  return {
+    write(r) {
+      sink(`${first ? "" : "\n"}${render([r], "markdown")}`);
+      first = false;
+    },
+    close: () => {},
+  };
+}
+
 export function openWriter(format: Format, sink: Sink): Writer {
-  return { jsonl, json, csv }[format](sink);
+  return { jsonl, json, csv, markdown }[format](sink);
 }
 
 /** The search_parameters that make two records answers to different searches. */

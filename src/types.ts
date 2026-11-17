@@ -57,6 +57,8 @@ export interface SerpRecord {
     egress?: "cloudflare" | "fallback";
     /** Which search engine served it; unset means Google. "duckduckgo" only with `ENGINE_FALLBACK`. */
     engine?: "google" | "duckduckgo";
+    /** Served from the result cache (`CACHE_TTL_S`); unset on a fresh search. */
+    cached?: boolean;
   };
   search_parameters: SearchParams & { engine: "google"; device: "desktop" };
   exit?: Record<string, unknown>;

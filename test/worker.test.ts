@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type Connect, createApp, parseTarget } from "../worker/src/app.js";
+import { type Connect, createApp, type Fetch, FETCH_MAX_BYTES, parseTarget } from "../worker/src/app.js";
 
 const env = { EGRESS_TOKEN: "egress-secret" };
 const ok = { authorization: "Bearer egress-secret", upgrade: "websocket", "x-connect-host": "www.google.com:443" };
@@ -87,5 +87,78 @@ describe("worker tunnel", () => {
 
     listeners.close!({ data: undefined });
     expect(server.close).toHaveBeenCalled();
+  });
+});
+
+describe("worker fetch", () => {
+  const auth = { authorization: "Bearer egress-secret" };
+  const fakeFetch = (res: () => Response = () => new Response("<p>hi</p>", { status: 200, headers: { "content-type": "text/html" } })) => {
+    const seen: Request[] = [];
+    const f = vi.fn<Fetch>(async (req) => (seen.push(req), res()));
+    return { f, seen };
+  };
+  const get = (f: Fetch, url: string, headers: Record<string, string> = auth, e: object = env) =>
+    createApp(noConnect, f).request(`/fetch?url=${encodeURIComponent(url)}`, { headers }, e);
+
+  it("checks the token first", async () => {
+    const { f } = fakeFetch();
+    expect((await get(f, "https://example.com/", {})).status).toBe(401);
+    expect((await get(f, "http://127.0.0.1/", { authorization: "Bearer nope" })).status).toBe(401);
+    expect((await get(f, "https://example.com/", auth, {})).status).toBe(401);
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("403 on bad URLs, ports, schemes and private addresses", async () => {
+    const { f } = fakeFetch();
+    for (const u of ["", "not a url", "ftp://example.com/", "file:///etc/passwd", "https://example.com:8443/", "http://127.0.0.1/",
+      "http://10.0.0.1/", "http://169.254.169.254/latest", "http://[::1]/", "http://0x7f.1/", "https://u:p@example.com/"]) {
+      expect((await get(f, u)).status, u).toBe(403);
+    }
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("builds a fresh request: only x-fetch-header-* go upstream, redirect manual", async () => {
+    const { f, seen } = fakeFetch();
+    const r = await get(f, "https://example.com/a?b=1", {
+      ...auth,
+      "x-fetch-header-user-agent": "UA",
+      "x-fetch-header-accept-language": "en",
+      "x-forwarded-for": "1.2.3.4",
+      "cf-connecting-ip": "1.2.3.4",
+      cookie: "c=1",
+      "user-agent": "caller",
+    });
+    expect(r.status).toBe(200);
+    const req = seen[0]!;
+    expect(req.url).toBe("https://example.com/a?b=1");
+    expect(req.method).toBe("GET");
+    expect(req.redirect).toBe("manual");
+    expect(Object.fromEntries(req.headers)).toEqual({ "user-agent": "UA", "accept-language": "en" });
+  });
+
+  it("relays the upstream status and headers in x-fetch-*, with status 200", async () => {
+    const { f } = fakeFetch(() => new Response(null, { status: 301, headers: { location: "https://example.com/new", "content-type": "text/html" } }));
+    const r = await get(f, "http://example.com/old");
+    expect(r.status).toBe(200);
+    expect(r.headers.get("x-fetch-status")).toBe("301");
+    expect(JSON.parse(r.headers.get("x-fetch-headers")!)).toMatchObject({ location: "https://example.com/new", "content-type": "text/html" });
+    expect(r.headers.get("x-fetch-truncated")).toBeNull();
+    const ok = await get(fakeFetch().f, "https://example.com/");
+    expect(await ok.text()).toBe("<p>hi</p>");
+  });
+
+  it("cuts the body at 3 MB and marks it", async () => {
+    const big = new Uint8Array(FETCH_MAX_BYTES + 10).fill(97);
+    const { f } = fakeFetch(() => new Response(big));
+    const r = await get(f, "https://example.com/big");
+    expect(r.headers.get("x-fetch-truncated")).toBe("1");
+    expect((await r.arrayBuffer()).byteLength).toBe(FETCH_MAX_BYTES);
+  });
+
+  it("502 when the fetch throws", async () => {
+    const f: Fetch = async () => { throw new Error("boom"); };
+    const r = await get(f, "https://example.com/");
+    expect(r.status).toBe(502);
+    expect(await r.text()).toContain("boom");
   });
 });

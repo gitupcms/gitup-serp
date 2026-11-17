@@ -1,6 +1,8 @@
 import { serve } from "@hono/node-server";
 import { startRuntime, type Runtime } from "./bootstrap.js";
 import { type Config, loadConfig } from "./config.js";
+import { extractor } from "./extract/attach.js";
+import { egressHttp } from "./extract/index.js";
 import { createApp } from "./server/app.js";
 
 let cfg: Config;
@@ -13,7 +15,7 @@ try {
   process.exit(1);
 }
 
-const app = createApp(rt.searcher, cfg);
+const app = createApp(rt.searcher, cfg, undefined, extractor(cfg.EXTRACT_PARALLEL, { http: egressHttp(rt.egressProxy, rt.fetchVia) }));
 const server = serve({ fetch: app.fetch, port: cfg.PORT, hostname: cfg.HOST }, (info) => {
   console.error(`listening on http://${cfg.HOST}:${info.port}/search.json?q=...`);
 });

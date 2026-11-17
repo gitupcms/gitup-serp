@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import type { ExtractFn } from "../src/extract/attach.js";
+import { NO_EGRESS } from "../src/extract/index.js";
 import { createMcpHandler } from "../src/mcp/index.js";
 import type { SearchParams, Searcher, SerpRecord } from "../src/types.js";
 
@@ -34,6 +36,63 @@ class Fake implements Searcher {
 
 const rpc = (id: number | undefined, method: string, params?: unknown) => ({ jsonrpc: "2.0", id, method, params });
 const callTool = (args: unknown) => rpc(1, "tools/call", { name: "google_search", arguments: args });
+
+describe("mcp extract", () => {
+  const noSearcher = () => Promise.reject(new Error("should not start"));
+  const asked: string[][] = [];
+  const fakeExtract: ExtractFn = async (urls) => {
+    asked.push(urls);
+    return [...new Set(urls)].map((url) => (url.includes("bad") ? { url, status: 500, markdown: "", text: "", error: "HTTP 500" } : { url, status: 200, title: "T", markdown: `# ${url}`, text: url }));
+  };
+  const extractCall = (args: unknown) => rpc(1, "tools/call", { name: "extract", arguments: args });
+
+  it("lists the extract tool and an extract arg on google_search", async () => {
+    const r = (await createMcpHandler(noSearcher)(rpc(1, "tools/list"))) as any;
+    expect(r.result.tools.map((t: any) => t.name)).toEqual(["google_search", "extract"]);
+    expect(r.result.tools[0].inputSchema.properties.extract).toMatchObject({ minimum: 0, maximum: 5, default: 0 });
+  });
+
+  it("returns markdown for url or urls", async () => {
+    const h = createMcpHandler(noSearcher, undefined, async () => fakeExtract);
+    const one = (await h(extractCall({ url: "https://a.example/" }))) as any;
+    expect(one.result).toEqual({ content: [{ type: "text", text: "# https://a.example/\n" }], isError: false });
+    const many = (await h(extractCall({ urls: ["https://a.example/", "https://bad.example/"] }))) as any;
+    expect(many.result.content[0].text).toBe("# https://a.example/\n\n# https://a.example/\n\n# https://bad.example/\n\nError: HTTP 500\n");
+    expect(many.result.isError).toBe(false);
+    const bad = (await h(extractCall({ urls: ["https://bad.example/"] }))) as any;
+    expect(bad.result.isError).toBe(true);
+  });
+
+  it("validates its arguments", async () => {
+    const h = createMcpHandler(noSearcher, undefined, async () => fakeExtract);
+    for (const [args, msg] of [
+      [{ url: "ftp://a.example/" }, "url must be an http(s) URL"],
+      [{ urls: Array.from({ length: 21 }, (_, i) => `https://a.example/${i}`) }, "urls takes at most 20 URLs"],
+      [{}, "give url or urls"],
+    ] as const) {
+      const r = (await h(extractCall(args))) as any;
+      expect(r.result).toEqual({ content: [{ type: "text", text: msg }], isError: true });
+    }
+  });
+
+  it("without an egress every page reports it", async () => {
+    const r = (await createMcpHandler(noSearcher)(extractCall({ url: "https://a.example/" }))) as any;
+    expect(r.result.content[0].text).toBe(`Error: ${NO_EGRESS}\n`);
+    expect(r.result.isError).toBe(true);
+  });
+
+  it("google_search extract=N adds the pages under the results and raises links", async () => {
+    asked.length = 0;
+    const fake = new Fake((p) => record(p, { organic_results: [{ position: 1, title: "a", link: "https://a.example/" }, { position: 2, title: "b", link: "https://b.example/" }] }));
+    const h = createMcpHandler(async () => fake, undefined, async () => fakeExtract);
+    const r = (await h(callTool({ query: "q", links: 0, extract: 1 }))) as any;
+    expect(fake.calls[0]!.links).toBe(1);
+    const body = JSON.parse(r.result.content[0].text);
+    expect(body.results[0].extracted).toEqual({ markdown: "# https://a.example/", title: "T" });
+    expect(body.results[1].extracted).toBeUndefined();
+    expect(asked).toEqual([["https://a.example/"]]);
+  });
+});
 
 describe("mcp handler", () => {
   const noSearcher = () => Promise.reject(new Error("should not start"));
@@ -84,6 +143,14 @@ describe("mcp handler", () => {
     expect(body.ai_overview).toBe("overview");
     expect(body.places).toEqual([{ title: "Cafe", rating: 4.5 }]);
     expect(body.errors).toBeUndefined();
+  });
+
+  it("maps date onto tbs and rejects a bad one", async () => {
+    const fake = new Fake((p) => record(p, { organic_results: [{ position: 1, title: "T", link: "https://a.example/" }] }));
+    await createMcpHandler(async () => fake)(callTool({ query: "cats", date: "w" }));
+    expect(fake.calls[0]).toMatchObject({ tbs: "qdr:w" });
+    const bad = (await createMcpHandler(async () => fake)(callTool({ query: "cats", date: "soon" }))) as any;
+    expect(bad.result.isError).toBe(true);
   });
 
   it("reports failures as isError, never a crash", async () => {

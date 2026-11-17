@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-// The command line: `search` (serpmaven's search path) and `doctor`. Records go to stdout or
+// The command line: `search` (serpmaven's search path), `extract` and `doctor`. Records go to stdout or
 // --output, everything else to stderr.
 
 import { randomUUID } from "node:crypto";
@@ -8,7 +8,10 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import type { Runtime } from "../bootstrap.js";
-import { glSchema, hlSchema, linksWaitSchema, searchDefaults } from "../config.js";
+import { dateSchema, dateTbs, extractParallel, glSchema, hlSchema, httpUrlSchema, linksWaitSchema, searchDefaults } from "../config.js";
+import { attachExtracts, type ExtractFn, extractor, linksFor, MAX_EXTRACT } from "../extract/attach.js";
+import { egressHttp } from "../extract/index.js";
+import { renderPages } from "../render.js";
 import { readEgressState, STATE_FILE } from "../egress/state.js";
 import type { SearchParams, SerpRecord, Timings } from "../types.js";
 import { answered, FORMATS, type Format, openWriter, type Sink } from "./output.js";
@@ -17,7 +20,9 @@ const ROOT = resolve(import.meta.dirname, "../..");
 
 const USAGE = `usage:
   gitup-serp search [query...] [--input FILE] [--pages N] [--hl LANG] [--gl CC] [--location TEXT]
-                    [--links N] [--links-wait S] [--format jsonl|json|csv] [--output FILE] [--resume]
+                    [--date h|d|w|m|y|YYYYMMDD..YYYYMMDD] [--links N] [--links-wait S] [--extract N]
+                    [--format jsonl|json|csv|markdown] [--output FILE] [--resume]
+  gitup-serp extract <url>... [--format markdown|json]
   gitup-serp doctor
 queries come from the arguments, --input (one per line) or stdin`;
 
@@ -41,8 +46,12 @@ export interface SearchOptions {
   hl: string;
   gl?: string;
   location?: string;
+  /** Google's tbs, from --date. */
+  tbs?: string;
   links?: number;
   links_wait?: number;
+  /** Extract the first N organic results with a link (0-5). */
+  extract: number;
   format: Format;
   output?: string;
   resume: boolean;
@@ -90,8 +99,10 @@ export function parseSearchArgs(args: string[], env: NodeJS.ProcessEnv = {}): Se
         hl: { type: "string" },
         gl: { type: "string" },
         location: { type: "string" },
+        date: { type: "string" },
         links: { type: "string" },
         "links-wait": { type: "string" },
+        extract: { type: "string" },
         format: { type: "string" },
         output: { type: "string" },
         resume: { type: "boolean" },
@@ -103,6 +114,10 @@ export function parseSearchArgs(args: string[], env: NodeJS.ProcessEnv = {}): Se
   const v = parsed.values;
   const format = (v.format ?? "jsonl") as Format;
   if (!FORMATS.includes(format)) throw new UsageError(`--format must be one of ${FORMATS.join(", ")}`);
+  const date = v.date === undefined ? undefined : dateSchema.safeParse(v.date);
+  if (date && !date.success) throw new UsageError(date.error.issues[0]!.message);
+  const extract = int("extract", v.extract, 0) ?? 0;
+  if (extract > MAX_EXTRACT) throw new UsageError(`--extract must be between 0 and ${MAX_EXTRACT}`);
   if (v.resume && (!v.output || format !== "jsonl")) throw new UsageError("--resume needs --output FILE in the jsonl format");
   return {
     queries: parsed.positionals,
@@ -110,8 +125,10 @@ export function parseSearchArgs(args: string[], env: NodeJS.ProcessEnv = {}): Se
     pages: int("pages", v.pages, 1) ?? 1,
     ...locale(v.hl, v.gl, env),
     location: v.location,
-    links: int("links", v.links, 0),
+    tbs: date ? dateTbs(date.data) : undefined,
+    links: linksFor(int("links", v.links, 0), extract),
     links_wait: linksWait(v["links-wait"]),
+    extract,
     format,
     output: v.output,
     resume: v.resume ?? false,
@@ -153,6 +170,46 @@ function errorRecord(params: SearchParams, error: string, seconds: number): Serp
   };
 }
 
+/** EXTRACT_PARALLEL pages at once through the runtime's egress; none without one. */
+function makeExtract(runtime: Runtime, env: NodeJS.ProcessEnv): ExtractFn {
+  let parallel;
+  try {
+    parallel = extractParallel(env);
+  } catch (err) {
+    throw new UsageError((err as Error).message);
+  }
+  return extractor(parallel, { http: egressHttp(runtime.egressProxy, runtime.fetchVia) });
+}
+
+/** Pages as markdown (default) or JSON (one object, or an array for several URLs); exit 1 if any failed. */
+async function extract(args: string[], deps: Deps): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseArgs({ args, allowPositionals: true, options: { format: { type: "string" } } });
+  } catch (err) {
+    throw new UsageError((err as Error).message);
+  }
+  const format = parsed.values.format ?? "markdown";
+  if (format !== "markdown" && format !== "json") throw new UsageError("--format must be markdown or json");
+  if (!parsed.positionals.length) throw new UsageError("no URL given");
+  const urls = parsed.positionals.map((u) => {
+    const r = httpUrlSchema.safeParse(u);
+    if (!r.success) throw new UsageError(`${r.error.issues[0]!.message}: ${u}`);
+    return r.data;
+  });
+  const runtime = await deps.startRuntime();
+  let pages;
+  try {
+    pages = await makeExtract(runtime, deps.env)(urls, deps.signal);
+  } finally {
+    await runtime.close();
+  }
+  if (format === "json") deps.stdout(`${JSON.stringify(pages.length === 1 ? pages[0] : pages, null, 2)}\n`);
+  else deps.stdout(renderPages(pages, "markdown"));
+  for (const p of pages) if (p.error) deps.stderr(`${p.url}: ${p.error}\n`);
+  return pages.some((p) => !p.markdown) ? 1 : 0;
+}
+
 /** The main phases in short, e.g. `queue 0.1s fetch 1.2s links 14.3s (held 9.0s, 18 lookups) exits 1`. */
 export function phases(t: Timings): string {
   const s = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
@@ -168,7 +225,7 @@ async function search(args: string[], deps: Deps): Promise<number> {
   const opts = parseSearchArgs(args, deps.env);
   let queries = await readQueries(opts, deps);
   if (opts.resume) {
-    const done = answered(opts.output!, opts.pages, { hl: opts.hl, gl: opts.gl, location: opts.location });
+    const done = answered(opts.output!, opts.pages, { hl: opts.hl, gl: opts.gl, location: opts.location, tbs: opts.tbs });
     const total = queries.length;
     queries = queries.filter((q) => !done.has(q));
     deps.stderr(`resume: ${total - queries.length} of ${total} queries already in ${opts.output}\n`);
@@ -188,6 +245,7 @@ async function search(args: string[], deps: Deps): Promise<number> {
   const writer = openWriter(opts.format, fd === undefined ? deps.stdout : (s) => void writeSync(fd, s));
   const runtime = await deps.startRuntime();
   let failed = false;
+  let extractPages: ExtractFn | undefined;
 
   /** The scraper's state when it is down but retries later (its breaker cooling down); else undefined. */
   const cooling = () => {
@@ -207,8 +265,9 @@ async function search(args: string[], deps: Deps): Promise<number> {
     });
 
   const runQuery = async (q: string) => {
+    let toExtract = opts.extract;
     for (let page = 1; page <= opts.pages && !ac.signal.aborted; page++) {
-      const params: SearchParams = { q, page, hl: opts.hl, gl: opts.gl, location: opts.location, links: opts.links, links_wait: opts.links_wait };
+      const params: SearchParams = { q, page, hl: opts.hl, gl: opts.gl, location: opts.location, tbs: opts.tbs, links: opts.links, links_wait: opts.links_wait };
       let start = performance.now();
       let record: SerpRecord;
       // A long run outlives the breaker: wait out its cooldown, and ask again a page it refused unasked.
@@ -227,6 +286,14 @@ async function search(args: string[], deps: Deps): Promise<number> {
           record = errorRecord(params, err instanceof Error ? `${err.name}: ${err.message}` : String(err), 0);
         }
         if (!(record.error?.startsWith("scraper is down") && cooling())) break;
+      }
+      if (toExtract > 0) {
+        extractPages ??= makeExtract(runtime, deps.env);
+        try {
+          toExtract -= await attachExtracts([record], toExtract, extractPages, ac.signal);
+        } catch {
+          if (ac.signal.aborted) return;
+        }
       }
       const seconds = ((performance.now() - start) / 1000).toFixed(1);
       const organic = Array.isArray(record.organic_results) ? record.organic_results.length : 0;
@@ -300,6 +367,7 @@ export async function main(argv: string[], deps: Deps): Promise<number> {
   const [command, ...rest] = argv;
   try {
     if (command === "search") return await search(rest, deps);
+    if (command === "extract") return await extract(rest, deps);
     if (command === "doctor" && !rest.length) return doctor(deps);
     throw new UsageError(command ? `unknown command: ${argv.join(" ")}` : "no command given");
   } catch (err) {

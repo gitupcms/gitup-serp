@@ -1,6 +1,6 @@
 {
   "name": "@gitupcms/gitup-serp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted Google SERP API, CLI and MCP server with a Cloudflare Workers egress",
   "license": "MIT",
   "repository": {
@@ -62,12 +62,14 @@
     "hono": "^4.13.18",
     "patchright": "^1.64.3",
     "tsx": "^4.23.15",
+    "turndown": "^7.2.5",
     "ws": "^8.23.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261116.1",
     "@types/node": "^26.6.6",
+    "@types/turndown": "^5.0.6",
     "@types/ws": "^8.18.2",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"

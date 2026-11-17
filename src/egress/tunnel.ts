@@ -16,7 +16,7 @@ export interface TunnelOptions {
   dailyLimit?: number; // default EGRESS_DAILY_LIMIT or 100000
 }
 
-/** A Worker answered but refused the target (403): not the Worker's fault, so no cooldown. */
+/** A Worker answered but refused or could not reach the target: not the Worker's fault, so no cooldown. */
 class TargetRefused extends Error {}
 /** Today's Worker request quota is used up. */
 class QuotaExceeded extends Error {}
@@ -85,8 +85,31 @@ export class EgressTunnel {
     );
   }
 
+  /**
+   * One URL fetched with a Worker's own fetch() (GET /fetch): for extraction from Cloudflare-hosted sites,
+   * which Workers cannot reach over TCP. Redirects are not followed. Counts one Worker request per attempt.
+   */
+  fetchVia(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<{ status: number; headers: Record<string, string>; body: Buffer }> {
+    return this.pick(async (worker) => {
+      const h: Record<string, string> = { authorization: `Bearer ${this.opts.token}` };
+      for (const [k, v] of Object.entries(headers)) h[`x-fetch-header-${k.toLowerCase()}`] = v;
+      const res = await fetch(`${worker.replace(/\/$/, "")}/fetch?url=${encodeURIComponent(url)}`, { headers: h, signal, redirect: "manual" });
+      if (res.status === 403) throw new TargetRefused("worker fetch: target not allowed");
+      if (res.status === 502) throw new TargetRefused((await res.text()).slice(0, 200) || "worker fetch failed");
+      if (res.status !== 200) throw new Error(`worker answered ${res.status}`);
+      const body = Buffer.from(await res.arrayBuffer());
+      if (res.headers.get("x-fetch-truncated")) throw new TargetRefused("worker fetch: body over 3 MB");
+      const up = JSON.parse(res.headers.get("x-fetch-headers") ?? "{}") as Record<string, string>;
+      return { status: Number(res.headers.get("x-fetch-status")), headers: up, body };
+    }, signal);
+  }
+
+  private open(target: string): Promise<WebSocket> {
+    return this.pick((url) => this.dial(url, target));
+  }
+
   /** Round-robin over Workers not in cooldown; a Worker that fails is cooled down and the next one tried. */
-  private async open(target: string): Promise<WebSocket> {
+  private async pick<T>(attempt: (worker: string) => Promise<T>, signal?: AbortSignal): Promise<T> {
     const { workers } = this.opts;
     const start = this.next;
     for (let i = 0; i < workers.length; i++) {
@@ -97,11 +120,11 @@ export class EgressTunnel {
       // Every dial is one Worker request on the account's daily quota, retries included.
       if (!this.usage.take()) throw new QuotaExceeded();
       try {
-        const ws = await this.dial(url, target);
+        const out = await attempt(url);
         this.health.delete(url);
-        return ws;
+        return out;
       } catch (err) {
-        if (err instanceof TargetRefused) throw err;
+        if (err instanceof TargetRefused || signal?.aborted) throw err;
         const fails = (this.health.get(url)?.fails ?? 0) + 1;
         const ms = Math.min((this.opts.cooldownMs ?? 5_000) * 2 ** (fails - 1), this.opts.maxCooldownMs ?? 300_000);
         this.health.set(url, { fails, until: Date.now() + ms });

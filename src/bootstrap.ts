@@ -1,7 +1,9 @@
 // Shared startup for the HTTP server, CLI and MCP: pick the egress, build the searcher.
 import { readEgressState } from "./egress/state.js";
 import { EgressTunnel } from "./egress/tunnel.js";
+import type { FetchVia } from "./extract/index.js";
 import { z } from "zod";
+import { CachingSearcher } from "./scraper/cache.js";
 import { DdgSearcher } from "./scraper/ddg.js";
 import { FailoverSearcher, FALLBACK_IDLE_S } from "./scraper/failover.js";
 import { createScraper } from "./scraper/index.js";
@@ -13,6 +15,10 @@ export interface Runtime {
   searcher: Searcher;
   /** True when a real scraper is behind `searcher` (false = stub). */
   live: boolean;
+  /** The egress proxy URL page extraction goes through (the tunnel or SCRAPER_PROXY); unset without egress. */
+  egressProxy?: string;
+  /** Set only with the Cloudflare tunnel: a Worker's fetch(), the extraction fallback for sites the tunnel refuses. */
+  fetchVia?: FetchVia;
   close(): Promise<void>;
 }
 
@@ -55,9 +61,19 @@ export async function startRuntime(env: NodeJS.ProcessEnv = process.env): Promis
     searcher = new FailoverSearcher(searcher, () => ddg);
     console.error("engine fallback: duckduckgo, only while Google refuses");
   } else if (engineFallback) console.error("ENGINE_FALLBACK ignored: it needs the Cloudflare egress, not SCRAPER_PROXY");
+  const cache = z
+    .object({ CACHE_TTL_S: z.coerce.number().min(0).default(120), CACHE_MAX: z.coerce.number().int().min(1).default(1000) })
+    .safeParse({ CACHE_TTL_S: env.CACHE_TTL_S || undefined, CACHE_MAX: env.CACHE_MAX || undefined });
+  if (!cache.success) {
+    const i = cache.error.issues[0]!;
+    throw new Error(`invalid config: ${i.path.join(".")}: ${i.message}`);
+  }
+  if (cache.data.CACHE_TTL_S > 0) searcher = new CachingSearcher(searcher, cache.data.CACHE_TTL_S * 1000, cache.data.CACHE_MAX);
   return {
     searcher,
     live: true,
+    egressProxy: env.SCRAPER_PROXY,
+    fetchVia: tunnel ? (url, headers, signal) => tunnel.fetchVia(url, headers, signal) : undefined,
     close: async () => {
       await Promise.allSettled([searcher.close(), tunnel?.close()]);
     },

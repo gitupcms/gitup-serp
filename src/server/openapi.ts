@@ -44,6 +44,7 @@ const record = {
         },
         verdict_reason: { type: ["string", "null"] },
         timings,
+        cached: { type: "boolean", description: "Served from the result cache (CACHE_TTL_S)." },
       },
     },
     search_parameters: { type: "object", additionalProperties: true },
@@ -71,6 +72,27 @@ const pending = {
       properties: { id: { type: "string" }, status: { type: "string", enum: ["Processing", "Error"] } },
     },
     error: { type: "string" },
+    via: { type: "string", enum: ["tunnel", "worker-fetch", "proxy"], description: "Which path served the page: the Cloudflare tunnel, a Worker's fetch() (Cloudflare-hosted sites), or SCRAPER_PROXY." },
+  },
+};
+
+const extracted = {
+  type: "object",
+  description:
+    "One page's main content. Fetched through the search egress (Cloudflare Workers or SCRAPER_PROXY), HTML only: " +
+    "no JavaScript rendering, no PDF. A failure is in `error`, with empty markdown and text.",
+  required: ["url", "status", "markdown", "text"],
+  properties: {
+    url: { type: "string", description: "The final URL, after redirects." },
+    status: { type: ["integer", "null"] },
+    title: { type: "string" },
+    description: { type: "string" },
+    lang: { type: "string" },
+    canonical: { type: "string" },
+    markdown: { type: "string" },
+    text: { type: "string" },
+    error: { type: "string" },
+    via: { type: "string", enum: ["tunnel", "worker-fetch", "proxy"], description: "Which path served the page: the Cloudflare tunnel, a Worker's fetch() (Cloudflare-hosted sites), or SCRAPER_PROXY." },
   },
 };
 
@@ -97,8 +119,15 @@ export function openapiDoc(query: z.ZodObject) {
     parameters,
     responses: {
       200: {
-        description: "A record, an array of records (pages > 1), or with async=true a Processing stub.",
-        content: json({ oneOf: [ref("Record"), { type: "array", items: ref("Record") }, ref("Pending")] }),
+        description:
+          "A record, an array of records (pages > 1), or with async=true a Processing stub. With format=markdown|text " +
+          "(or Accept: text/markdown / text/plain and no format), every page rendered as text.",
+        headers: { "X-Cache": { schema: { type: "string", enum: ["HIT", "MISS"] }, description: "Single-page synchronous requests." } },
+        content: {
+          ...json({ oneOf: [ref("Record"), { type: "array", items: ref("Record") }, ref("Pending")] }),
+          "text/markdown": { schema: { type: "string" } },
+          "text/plain": { schema: { type: "string" } },
+        },
       },
       400: errorResponse("Invalid parameter, or ?api_key= used instead of the Authorization header."),
       401: errorResponse("Missing or wrong API key."),
@@ -111,12 +140,82 @@ export function openapiDoc(query: z.ZodObject) {
     },
   };
 
+  const extractResponses = {
+    200: {
+      description:
+        "The page (an array for urls). With format=markdown|text (or the Accept header), the body as text; several pages " +
+        "under a heading per URL.",
+      content: {
+        ...json({ oneOf: [ref("Extracted"), { type: "array", items: ref("Extracted") }] }),
+        "text/markdown": { schema: { type: "string" } },
+        "text/plain": { schema: { type: "string" } },
+      },
+    },
+    400: errorResponse("Not an http(s) URL, more than 20 URLs, or an invalid parameter."),
+    401: errorResponse("Missing or wrong API key."),
+    429: errorResponse("Rate limit exceeded."),
+  };
+
   return {
     openapi: "3.1.0",
     info: { title: "gitup-serp", version: "1" },
     security: [{ bearer: [] }],
     paths: {
       "/search.json": { get: searchOp },
+      "/extract": {
+        get: {
+          summary: "One web page's main content as markdown, through the search egress. Not queued with searches.",
+          parameters: [
+            { name: "url", in: "query", required: true, schema: { type: "string", format: "uri", maxLength: 2048 }, description: "An http(s) URL." },
+            { name: "format", in: "query", required: false, schema: { type: "string", enum: ["json", "markdown", "text"] } },
+          ],
+          responses: extractResponses,
+        },
+        post: {
+          summary: "One or several pages (at most 20, duplicates dropped); {url} answers one object, {urls} an array.",
+          parameters: [{ name: "format", in: "query", required: false, schema: { type: "string", enum: ["json", "markdown", "text"] } }],
+          requestBody: {
+            required: true,
+            content: json({
+              type: "object",
+              properties: {
+                url: { type: "string", format: "uri" },
+                urls: { type: "array", items: { type: "string", format: "uri" }, minItems: 1, maxItems: 20 },
+              },
+              oneOf: [{ required: ["url"] }, { required: ["urls"] }],
+            }),
+          },
+          responses: { ...extractResponses, 413: errorResponse("Body over 64 KB.") },
+        },
+      },
+      "/parse": {
+        post: {
+          summary: "Classify and parse a Google results page you already have. No browser, no network.",
+          parameters: [
+            { name: "hl", in: "query", required: false, schema: { type: "string" }, description: "Page language; default DEFAULT_HL." },
+            { name: "url", in: "query", required: false, schema: { type: "string" }, description: "The page's final URL, for the verdict." },
+          ],
+          requestBody: { required: true, content: { "text/html": { schema: { type: "string", maxLength: 5 * 1024 * 1024 } } } },
+          responses: {
+            200: {
+              description: "page_verdict, verdict_reason and the parsed blocks of a Record.",
+              content: json({
+                type: "object",
+                required: ["page_verdict", "verdict_reason"],
+                properties: {
+                  page_verdict: record.properties.search_metadata.properties.page_verdict,
+                  verdict_reason: { type: "string" },
+                  ...Object.fromEntries(Object.entries(record.properties).filter(([k]) => !["search_metadata", "search_parameters", "error"].includes(k))),
+                },
+              }),
+            },
+            400: errorResponse("Invalid parameter."),
+            401: errorResponse("Missing or wrong API key."),
+            413: errorResponse("Body over 5 MB."),
+            429: errorResponse("Rate limit exceeded."),
+          },
+        },
+      },
       "/searches/{id}.json": {
         get: {
           summary: "A search from the last hour, by id (async results land here).",
@@ -146,6 +245,7 @@ export function openapiDoc(query: z.ZodObject) {
         Error: error,
         Record: record,
         Pending: pending,
+        Extracted: extracted,
         Health: {
           type: "object",
           required: ["state"],

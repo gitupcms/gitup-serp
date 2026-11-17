@@ -125,3 +125,15 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [-] Legacy paket uyumluluk katmanları (gserp, google-browser-scraper).
 - [-] flaregun'un fetch modu (gerçek IP'yi sızdırıyor) ve CFspider'ın VLESS, panel ve kod gizleme bölümleri.
 - [+] npm paketi hazır: `@gitupcms/gitup-serp` (0.1.0). `gitup-serp setup | egress up/down/ls | serve | mcp | canary | search | doctor`. Paketlenmiş hali geçici bir klasöre kurulup denendi (doctor, serve, mcp, egress). Yayınlamak için `npm login` gerekiyor (kullanıcı).
+- [+] karust/openserp'ten alınanlar (0.2.0):
+  - Önbellek (`CACHE_TTL_S` 120, `CACHE_MAX`, `X-Cache`, aynı anda gelen aynı sorgu tek arama).
+  - Çıktı formatları (`format=markdown|text`, `Accept`, CLI `--format markdown`).
+  - Tarih filtresi (`date=h|d|w|m|y` ya da `YYYYMMDD..YYYYMMDD` → `tbs`).
+  - `POST /parse`.
+  - Sayfa içeriği çıkarma: `/extract`, aramada `extract=N`, MCP `extract` aracı, CLI `gitup-serp extract`.
+- [+] Çıkarma yalnız çıkıştan geçiyor, makineden doğrudan hiç çekmiyor. Cloudflare arkasındaki siteler için Worker'a `/fetch` modu eklendi: tünel TLS'te kopunca (curl 35) ya da CONNECT reddedilince aynı URL Worker `fetch()`'i ile çekiliyor. Kayıtta `via` alanı var.
+  - Canlı: wikipedia ve rei tünelden; hono.dev, developers.cloudflare.com ve discord.com `worker-fetch` ile geldi.
+  - `cdn-cgi/trace` ile kontrol: sitenin gördüğü IP bizimki değil, bir Cloudflare IPv6 adresi.
+  - Uçtan uca `search --extract 2 --format markdown --date y` çalıştı.
+- [ ] Çıkarma kalitesi: bazı sayfalarda (YouTube, Medium) menü ve link kalabalığı kalıyor; UTF-8 dışı karakter kodlaması yok; PDF yok.
+

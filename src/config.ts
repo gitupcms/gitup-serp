@@ -15,6 +15,34 @@ export const linksWaitSchema = z
   .min(0, linksWaitRange)
   .max(LINKS_WAIT_MAX_S, linksWaitRange);
 
+// A page to extract, same rules in the HTTP API, the CLI and MCP.
+export const httpUrlSchema = z
+  .string({ error: "url must be an http(s) URL" })
+  .trim()
+  .max(2048, "url is too long")
+  .refine((v) => URL.canParse(v) && /^https?:$/.test(new URL(v).protocol), "url must be an http(s) URL");
+
+// date filter, same rules in the HTTP API, the CLI and MCP: past hour/day/week/month/year or a day range.
+const RANGE = /^(\d{4})(\d{2})(\d{2})\.\.(\d{4})(\d{2})(\d{2})$/;
+const realDay = (y: string, m: string, d: string) => {
+  const t = new Date(Date.UTC(+y, +m - 1, +d));
+  return t.getUTCFullYear() === +y && t.getUTCMonth() === +m - 1 && t.getUTCDate() === +d;
+};
+export const dateSchema = z
+  .string()
+  .regex(/^([hdwmy]|\d{8}\.\.\d{8})$/, "date must be h, d, w, m, y or a range YYYYMMDD..YYYYMMDD")
+  .refine((v) => {
+    const r = RANGE.exec(v);
+    return !r || (realDay(r[1]!, r[2]!, r[3]!) && realDay(r[4]!, r[5]!, r[6]!) && v.slice(0, 8) <= v.slice(10));
+  }, "date range must be two real days YYYYMMDD..YYYYMMDD, the first not after the second");
+
+/** Google's `tbs` for a validated `date`, after any `tbs` the caller gave: "d" → "qdr:d". */
+export function dateTbs(date: string, tbs?: string): string {
+  const r = RANGE.exec(date);
+  const f = r ? `cdr:1,cd_min:${+r[2]!}/${+r[3]!}/${r[1]},cd_max:${+r[5]!}/${+r[6]!}/${r[4]}` : `qdr:${date}`;
+  return tbs ? `${tbs},${f}` : f;
+}
+
 /** Exits sit in many countries; without a gl Google answers in the exit's language. `DEFAULT_GL=` turns it off. */
 const defaultsSchema = z.object({
   DEFAULT_HL: z
@@ -46,7 +74,16 @@ export function searchDefaults(env: NodeJS.ProcessEnv = process.env): SearchDefa
   return { hl: d.DEFAULT_HL, gl: d.DEFAULT_GL };
 }
 
+// Page extractions at once (API /extract, `extract=N`, MCP, CLI).
+const extractSchema = z.object({ EXTRACT_PARALLEL: z.preprocess((v) => v || undefined, int(3)) });
+
+/** EXTRACT_PARALLEL for MCP and the CLI; throws on an invalid value. */
+export function extractParallel(env: NodeJS.ProcessEnv = process.env): number {
+  return parseEnv(extractSchema, env).EXTRACT_PARALLEL;
+}
+
 const schema = defaultsSchema.extend({
+  ...extractSchema.shape,
   PORT: z.coerce.number().int().min(0).max(65535).default(8080),
   HOST: z.string().min(1).default("127.0.0.1"),
   OPENSERP_API_KEY: z

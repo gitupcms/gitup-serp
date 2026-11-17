@@ -283,7 +283,7 @@ describe("startRuntime picks failover", () => {
   it("wraps when the primary is cloudflare and FALLBACK_PROXY is set; the fallback starts on demand with no spares", async () => {
     const { startRuntime } = await import("../src/bootstrap.js");
     made.egress = egress;
-    const rt = await startRuntime({ FALLBACK_PROXY: "http://user-{session}:secret@res.example:8000" });
+    const rt = await startRuntime({ CACHE_TTL_S: "0", FALLBACK_PROXY: "http://user-{session}:secret@res.example:8000" });
     expect(rt.searcher).toBeInstanceOf(FailoverSearcher);
     expect(made.calls).toHaveLength(1);
     const logs = vi.mocked(console.error).mock.calls.flat().join("\n");
@@ -310,7 +310,7 @@ describe("startRuntime picks failover", () => {
   it("ENGINE_FALLBACK without FALLBACK_PROXY: cloudflare, then DuckDuckGo", async () => {
     const { startRuntime } = await import("../src/bootstrap.js");
     made.egress = egress;
-    const rt = await startRuntime({ ENGINE_FALLBACK: "duckduckgo" });
+    const rt = await startRuntime({ CACHE_TTL_S: "0", ENGINE_FALLBACK: "duckduckgo" });
     const f = rt.searcher as FailoverSearcher;
     expect(f).toBeInstanceOf(FailoverSearcher);
     const inner = f as unknown as { primary: unknown; makeFallback: () => unknown };
@@ -323,7 +323,7 @@ describe("startRuntime picks failover", () => {
   it("ENGINE_FALLBACK with FALLBACK_PROXY: residential nested inside, DuckDuckGo last", async () => {
     const { startRuntime } = await import("../src/bootstrap.js");
     made.egress = egress;
-    const rt = await startRuntime({ ENGINE_FALLBACK: "duckduckgo", FALLBACK_PROXY: "http://u:p@r.example:2" });
+    const rt = await startRuntime({ CACHE_TTL_S: "0", ENGINE_FALLBACK: "duckduckgo", FALLBACK_PROXY: "http://u:p@r.example:2" });
     const outer = rt.searcher as unknown as { primary: unknown; makeFallback: () => unknown };
     expect(outer.primary).toBeInstanceOf(FailoverSearcher);
     expect(outer.makeFallback()).toBeInstanceOf(DdgSearcher);
@@ -337,6 +337,17 @@ describe("startRuntime picks failover", () => {
     made.egress = undefined;
     const rt = await startRuntime({ SCRAPER_PROXY: "http://h:1", ENGINE_FALLBACK: "duckduckgo" });
     expect(rt.searcher).not.toBeInstanceOf(FailoverSearcher);
+  });
+
+  it("puts the result cache in front unless CACHE_TTL_S=0, and rejects a bad cache setting", async () => {
+    const { startRuntime } = await import("../src/bootstrap.js");
+    const { CachingSearcher } = await import("../src/scraper/cache.js");
+    made.egress = egress;
+    const rt = await startRuntime({ FALLBACK_PROXY: "http://u:p@r.example:2" });
+    expect(rt.searcher).toBeInstanceOf(CachingSearcher);
+    expect(rt.searcher.health().cache).toEqual({ size: 0 });
+    await rt.close();
+    await expect(startRuntime({ CACHE_MAX: "0" })).rejects.toThrow(/CACHE_MAX/);
   });
 
   it("rejects a bad FALLBACK_PROXY at startup", async () => {

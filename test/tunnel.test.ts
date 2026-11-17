@@ -12,8 +12,10 @@ const listen = (s: net.Server) =>
   new Promise<number>((r) => s.listen(0, "127.0.0.1", () => r((s.address() as net.AddressInfo).port)));
 
 let echo: net.Server, worker: http.Server, dead: net.Server, tunnel: EgressTunnel;
+let deadPort: number;
 let deadHits = 0;
 const targets: string[] = [];
+const fetched: { url: string; headers: http.IncomingHttpHeaders }[] = [];
 let proxy: URL;
 let workerPort: number;
 const usageFile = join(mkdtempSync(join(tmpdir(), "openserp-tunnel-")), "usage.json");
@@ -23,7 +25,14 @@ beforeAll(async () => {
   const echoPort = await listen(echo);
 
   // Fake Worker: checks the Bearer token, then pipes the WebSocket to the local echo server.
-  worker = http.createServer();
+  worker = http.createServer((req, res) => {
+    // Fake GET /fetch: relays a canned upstream answer the way the Worker does.
+    const u = new URL(req.url ?? "", "http://w");
+    if (u.pathname !== "/fetch" || req.headers.authorization !== `Bearer ${TOKEN}`) return res.writeHead(401).end();
+    fetched.push({ url: u.searchParams.get("url") ?? "", headers: req.headers });
+    if (u.searchParams.get("url")!.includes("refused")) return res.writeHead(403).end("target not allowed");
+    res.writeHead(200, { "x-fetch-status": "301", "x-fetch-headers": JSON.stringify({ location: "https://cf.example/b" }) }).end("body");
+  });
   const wss = new WebSocketServer({ noServer: true });
   worker.on("upgrade", (req, socket, head) => {
     if (req.url !== "/tunnel" || req.headers.authorization !== `Bearer ${TOKEN}`) {
@@ -42,7 +51,7 @@ beforeAll(async () => {
 
   // Dead Worker: accepts TCP and drops it, counting attempts.
   dead = net.createServer((s) => (deadHits++, s.destroy()));
-  const deadPort = await listen(dead);
+  deadPort = await listen(dead);
 
   tunnel = new EgressTunnel({ workers: [`http://127.0.0.1:${deadPort}`, `http://127.0.0.1:${workerPort}`], token: TOKEN, usageFile });
   proxy = new URL((await tunnel.start()).url);
@@ -131,5 +140,24 @@ describe("egress tunnel", () => {
       await t.close();
     }
     expect(JSON.parse(readFileSync(`${usageFile}.limit`, "utf8")).count).toBe(1);
+  });
+
+  it("fetchVia calls /fetch round-robin with cooldown and quota counting", async () => {
+    const t = new EgressTunnel({ workers: [`http://127.0.0.1:${deadPort}`, `http://127.0.0.1:${workerPort}`], token: TOKEN, usageFile: `${usageFile}.fetch` });
+    const hits = deadHits;
+    try {
+      const r = await t.fetchVia("https://cf.example/a", { "User-Agent": "UA" });
+      expect(r).toEqual({ status: 301, headers: { location: "https://cf.example/b" }, body: Buffer.from("body") });
+      expect(fetched.at(-1)!.url).toBe("https://cf.example/a");
+      expect(fetched.at(-1)!.headers["x-fetch-header-user-agent"]).toBe("UA");
+      expect(deadHits).toBe(hits + 1);
+      // The dead worker is cooling down; a refused target fails at once and cools nothing down.
+      await expect(t.fetchVia("https://refused.example/", {})).rejects.toThrow("target not allowed");
+      expect(deadHits).toBe(hits + 1);
+      await t.fetchVia("https://cf.example/a", {});
+      expect(t.usage.today).toBe(4); // dead + live, live (refused), live
+    } finally {
+      await t.close();
+    }
   });
 });

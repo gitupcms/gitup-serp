@@ -1,5 +1,10 @@
+import { readFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import type { Config } from "../src/config.js";
+import { CachingSearcher } from "../src/scraper/cache.js";
+import type { ExtractFn } from "../src/extract/attach.js";
+import type { Extracted } from "../src/extract/index.js";
 import { createApp, querySchema } from "../src/server/app.js";
 import type { SearchParams, Searcher, SerpRecord } from "../src/types.js";
 
@@ -16,6 +21,7 @@ const base: Config = {
   DEFAULT_HL: "en",
   DEFAULT_GL: "us",
   TRUST_PROXY: false,
+  EXTRACT_PARALLEL: 3,
 };
 const auth = { Authorization: `Bearer ${KEY}` };
 
@@ -238,5 +244,163 @@ describe("openapi", () => {
     const app = make(new Fake(), { RATE_PER_MIN: 1 });
     expect((await app.request("/openapi.json")).status).toBe(200);
     expect((await app.request("/openapi.json")).status).toBe(429);
+  });
+});
+
+describe("cache header", () => {
+  it("sends X-Cache MISS then HIT for single-page synchronous requests, none for pages > 1", async () => {
+    const fake = new Fake();
+    const app = make(new CachingSearcher(fake, 60_000, 10));
+    const first = await app.request("/search.json?q=shoes", { headers: auth });
+    expect(first.headers.get("X-Cache")).toBe("MISS");
+    const second = await app.request("/search.json?q=shoes", { headers: auth });
+    expect(second.headers.get("X-Cache")).toBe("HIT");
+    expect((await second.json()).search_metadata.cached).toBe(true);
+    expect(fake.calls.length).toBe(1);
+    const multi = await app.request("/search.json?q=shoes&pages=2", { headers: auth });
+    expect(multi.headers.get("X-Cache")).toBeNull();
+    const health = await app.request("/health");
+    expect((await health.json()).cache).toEqual({ size: 2 });
+  });
+});
+
+describe("format", () => {
+  it.each([
+    ["format=markdown", {}, "text/markdown", "# shoes"],
+    ["format=text", {}, "text/plain", "shoes"],
+    ["", { Accept: "text/markdown" }, "text/markdown", "# shoes"],
+    ["", { Accept: "text/plain" }, "text/plain", "shoes"],
+    ["format=json", { Accept: "text/markdown" }, "application/json", "{"],
+    ["", { Accept: "text/html,*/*" }, "application/json", "{"],
+  ])("%s %j → %s", async (query, headers, type, start) => {
+    const res = await make().request(`/search.json?q=shoes&${query}`, { headers: { ...auth, ...headers } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain(type);
+    expect((await res.text()).startsWith(start)).toBe(true);
+  });
+  it("renders every page in order", async () => {
+    const res = await make().request("/search.json?q=shoes&pages=2&format=markdown", { headers: auth });
+    expect(await res.text()).toMatch(/^# shoes\n[\s\S]*\n# shoes \(page 2\)\n$/);
+  });
+  it("rejects an unknown format", async () => {
+    const res = await make().request("/search.json?q=shoes&format=xml", { headers: auth });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "format must be json, markdown or text" });
+  });
+});
+
+describe("date", () => {
+  it("maps date onto tbs, after a given tbs", async () => {
+    const fake = new Fake();
+    await make(fake).request("/search.json?q=shoes&date=w&tbs=li:1", { headers: auth });
+    await make(fake).request("/search.json?q=shoes&date=20240101..20240131", { headers: auth });
+    expect(fake.calls.map((c) => c.tbs)).toEqual(["li:1,qdr:w", "cdr:1,cd_min:1/1/2024,cd_max:1/31/2024"]);
+    expect(fake.calls[0]).not.toHaveProperty("date");
+  });
+  it("rejects a bad date", async () => {
+    const res = await make().request("/search.json?q=shoes&date=yesterday", { headers: auth });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/^date must be/);
+  });
+});
+
+describe("POST /parse", () => {
+  const html = gunzipSync(readFileSync(new URL("fixtures/car-insurance-quote.html.gz", import.meta.url))).toString();
+  const post = (body: string, headers: Record<string, string> = auth, query = "") =>
+    make().request(`/parse${query}`, { method: "POST", body, headers: { "Content-Type": "text/html", ...headers } });
+
+  it("classifies and parses a page", async () => {
+    const res = await post(html, auth, "?hl=en&url=https%3A%2F%2Fwww.google.com%2Fsearch%3Fq%3Dx");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.page_verdict).toBe("serp");
+    expect(body.organic_results.length).toBeGreaterThanOrEqual(8);
+    expect(body).not.toHaveProperty("goto_links");
+    expect(body).not.toHaveProperty("ping_paths");
+  });
+  it("answers 413 over 5 MB", async () => {
+    const res = await post("x".repeat(5 * 1024 * 1024 + 1));
+    expect(res.status).toBe(413);
+  });
+  it("needs the API key and validates hl", async () => {
+    expect((await post(html, {})).status).toBe(401);
+    expect((await post(html, auth, "?hl=x")).status).toBe(400);
+  });
+});
+
+describe("extract", () => {
+  const page = (url: string): Extracted => ({ url, status: 200, title: `T ${url}`, markdown: `# md ${url}`, text: `text ${url}` });
+  const fakeExtract = () => {
+    const asked: string[][] = [];
+    const fn: ExtractFn = async (urls) => (asked.push(urls), [...new Set(urls)].map(page));
+    return { fn, asked };
+  };
+  const app = (ex = fakeExtract(), s: Searcher = new Fake()) => createApp(s, base, () => {}, ex.fn);
+  const post = (body: unknown) =>
+    ({ method: "POST", headers: { ...auth, "Content-Type": "application/json" }, body: JSON.stringify(body) }) as const;
+
+  it("GET answers one page; format=markdown answers its body", async () => {
+    const ex = fakeExtract();
+    const res = await app(ex).request("/extract?url=https://a.example/x", { headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ url: "https://a.example/x", markdown: "# md https://a.example/x" });
+    const md = await app(ex).request("/extract?url=https://a.example/x&format=markdown", { headers: auth });
+    expect(md.headers.get("Content-Type")).toContain("text/markdown");
+    expect(await md.text()).toBe("# md https://a.example/x\n");
+  });
+
+  it("POST {urls} answers an array, deduped; text format puts a heading per URL", async () => {
+    const ex = fakeExtract();
+    const res = await app(ex).request("/extract", post({ urls: ["https://a.example/", "https://b.example/", "https://a.example/"] }));
+    expect((await res.json()).map((p: Extracted) => p.url)).toEqual(["https://a.example/", "https://b.example/"]);
+    const txt = await app(ex).request("/extract?format=text", post({ urls: ["https://a.example/", "https://b.example/"] }));
+    expect(await txt.text()).toBe("https://a.example/\n\ntext https://a.example/\n\nhttps://b.example/\n\ntext https://b.example/\n");
+    const one = await app(ex).request("/extract", post({ url: "https://a.example/" }));
+    expect(Array.isArray(await one.json())).toBe(false);
+  });
+
+  it.each([
+    ["GET without url", "/extract", undefined, "url is required"],
+    ["GET ftp url", "/extract?url=ftp://a.example/", undefined, "url must be an http(s) URL"],
+    ["POST bad url", "/extract", { urls: ["not a url"] }, "url must be an http(s) URL"],
+    ["POST over 20", "/extract", { urls: Array.from({ length: 21 }, (_, i) => `https://a.example/${i}`) }, "urls takes at most 20 URLs"],
+    ["POST both", "/extract", { url: "https://a.example/", urls: ["https://b.example/"] }, "give url or urls"],
+    ["POST neither", "/extract", {}, "give url or urls"],
+  ])("400s %s", async (_name, path, body, error) => {
+    const ex = fakeExtract();
+    const res = await app(ex).request(path, body === undefined ? { headers: auth } : post(body));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe(error);
+    expect(ex.asked).toHaveLength(0);
+  });
+
+  it("is in the OpenAPI document", async () => {
+    const doc = await (await app().request("/openapi.json")).json();
+    expect(Object.keys(doc.paths["/extract"])).toEqual(["get", "post"]);
+    expect(doc.components.schemas.Extracted.required).toContain("markdown");
+  });
+
+  it("needs the API key like /search", async () => {
+    expect((await app().request("/extract?url=https://a.example/")).status).toBe(401);
+  });
+
+  it("search extract=N attaches pages to the first N linked results and raises links", async () => {
+    const ex = fakeExtract();
+    const s = new Fake();
+    const linked: Searcher = {
+      health: () => s.health(),
+      async search(p) {
+        const r = await s.search(p);
+        return { ...r, organic_results: [{ title: "a", link: "https://a.example/" }, { title: "n", link: null }, { title: "b", link: "https://b.example/" }, { title: "c", link: "https://c.example/" }] };
+      },
+    };
+    const res = await app(ex, linked).request("/search.json?q=x&links=0&extract=2", { headers: auth });
+    const body = await res.json();
+    expect(s.calls[0]!.links).toBe(2);
+    expect(ex.asked).toEqual([["https://a.example/", "https://b.example/"]]);
+    expect(body.organic_results.map((o: any) => o.extracted?.title)).toEqual(["T https://a.example/", undefined, "T https://b.example/", undefined]);
+    expect((await app(ex, linked).request("/search.json?q=x&extract=6", { headers: auth })).status).toBe(400);
+    await app(ex, linked).request("/search.json?q=x", { headers: auth });
+    expect(ex.asked).toHaveLength(1); // extract defaults to 0
   });
 });
