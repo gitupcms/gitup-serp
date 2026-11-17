@@ -1,10 +1,45 @@
 {
-  "name": "openserp",
-  "version": "0.0.1",
-  "private": true,
+  "name": "@gitupcms/gitup-serp",
+  "version": "0.1.0",
+  "description": "Self-hosted Google SERP API, CLI and MCP server with a Cloudflare Workers egress",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gitupcms/gitup-serp.git"
+  },
+  "homepage": "https://github.com/gitupcms/gitup-serp#readme",
+  "bugs": "https://github.com/gitupcms/gitup-serp/issues",
+  "keywords": [
+    "serp",
+    "google",
+    "scraper",
+    "search",
+    "mcp",
+    "cloudflare-workers",
+    "hono"
+  ],
   "type": "module",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "bin": {
     "gitup-serp": "cli.mjs"
+  },
+  "files": [
+    "cli.mjs",
+    "src",
+    "worker/src",
+    "worker/tsconfig.json",
+    ".env.example"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
@@ -26,6 +61,7 @@
     "esbuild": "^0.28.2",
     "hono": "^4.13.18",
     "patchright": "^1.64.3",
+    "tsx": "^4.23.15",
     "ws": "^8.23.0",
     "zod": "^4.6.7"
   },
@@ -33,7 +69,6 @@
     "@cloudflare/workers-types": "^5.20261116.1",
     "@types/node": "^26.6.6",
     "@types/ws": "^8.18.2",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
   }

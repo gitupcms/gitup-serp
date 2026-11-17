@@ -28,7 +28,7 @@ export async function startRuntime(env: NodeJS.ProcessEnv = process.env): Promis
     console.error(`egress: cloudflare, ${egress.workers.length} workers`);
   }
   if (!env.SCRAPER_PROXY) {
-    console.error("no egress: run `npm run egress:up` or set SCRAPER_PROXY; using the stub searcher (every search returns an Error record)");
+    console.error("no egress: run `npm run egress:up` (`gitup-serp egress up`) or set SCRAPER_PROXY; using the stub searcher (every search returns an Error record)");
     return { searcher: new StubSearcher(), live: false, close: async () => { await tunnel?.close(); } };
   }
   const made = createScraper(env);

@@ -1,12 +1,15 @@
 // MCP server over stdio: newline-delimited JSON-RPC 2.0, one tool `google_search`.
 // Hand-written against the MCP spec (no SDK), after serpmaven's mcp.py (MIT).
 // stdout carries protocol messages only; every log goes to stderr.
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import { startRuntime, type Runtime } from "../bootstrap.js";
 import { glSchema, hlSchema, LINKS_WAIT_MAX_S, linksWaitSchema, searchDefaults, type SearchDefaults } from "../config.js";
 import type { Searcher, SerpRecord } from "../types.js";
+
+const { version } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string };
 
 export const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
 const MAX_PAGES = 3;
@@ -156,7 +159,7 @@ export function createMcpHandler(getSearcher: () => Promise<Searcher>, defaults:
         return {
           protocolVersion: (SUPPORTED_VERSIONS as readonly unknown[]).includes(asked) ? asked : SUPPORTED_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: "openserp", version: "0.0.1" },
+          serverInfo: { name: "gitup-serp", version },
         };
       }
       case "ping":

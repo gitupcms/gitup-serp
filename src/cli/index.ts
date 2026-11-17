@@ -266,12 +266,12 @@ function doctor(deps: Deps): number {
   const checks: [boolean, string][] = [];
   const major = Number(process.versions.node.split(".")[0]);
   checks.push([major >= 22, `Node ${process.versions.node} (22 or newer)`]);
-  checks.push([existsSync(resolve(ROOT, "bin/curl-impersonate")), "curl-impersonate in bin/ (npm run setup)"]);
+  checks.push([existsSync(resolve(ROOT, "bin/curl-impersonate")), "curl-impersonate in bin/ (npm run setup, or gitup-serp setup)"]);
   let chromium = false;
   try {
     chromium = readdirSync(resolve(ROOT, ".browsers")).some((d) => d.startsWith("chromium-"));
   } catch {}
-  checks.push([chromium, "Chromium in .browsers/ (npm run setup)"]);
+  checks.push([chromium, "Chromium in .browsers/ (npm run setup, or gitup-serp setup)"]);
   const display = deps.env.DISPLAY ? "DISPLAY" : deps.env.WAYLAND_DISPLAY ? "WAYLAND_DISPLAY" : undefined;
   checks.push([Boolean(display), display ? `display: ${display} is set` : "display: neither DISPLAY nor WAYLAND_DISPLAY is set (headful Chromium needs one, e.g. Xvfb)"]);
   // Same order as bootstrap: SCRAPER_PROXY wins over the state file.
@@ -281,7 +281,7 @@ function doctor(deps: Deps): number {
       const state = readEgressState();
       checks.push(state
         ? [true, `egress: cloudflare, ${state.workers.length} workers in ${STATE_FILE}`]
-        : [false, "egress: none (npm run egress:up or set SCRAPER_PROXY)"]);
+        : [false, "egress: none (npm run egress:up, gitup-serp egress up, or set SCRAPER_PROXY)"]);
     } catch (err) {
       checks.push([false, `egress: ${(err as Error).message}`]);
     }

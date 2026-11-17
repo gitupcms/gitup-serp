@@ -19,6 +19,21 @@ This needs a display, because Chromium runs headful. On a server, use Xvfb, or r
 
 `npm run cli -- doctor` checks the setup offline. It never prints secret values.
 
+### From npm
+
+Linux x64 only (the curl-impersonate build is), Node 22.9 or newer. Run it in a directory holding your `.env`:
+
+```bash
+npm install -g @gitupcms/gitup-serp
+gitup-serp setup              # Chromium + curl-impersonate, into the package directory
+gitup-serp egress up 3        # also: egress down, egress ls
+gitup-serp serve              # HTTP API; also: mcp, canary
+gitup-serp search "hono framework"
+gitup-serp doctor
+```
+
+With npx, for an MCP client: `claude mcp add gitup-serp -- npx -y @gitupcms/gitup-serp mcp`. The egress state lives in `.openserp/` in the current directory (`EGRESS_STATE_DIR` to move it).
+
 ## Cloudflare token
 
 1. In the Cloudflare dashboard, go to **My Profile → API Tokens → Create Token** and pick the **Edit Cloudflare Workers** template.

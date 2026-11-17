@@ -124,3 +124,4 @@ Not: "Canlı" etiketi, gerçek Google'a karşı Cloudflare çıkışıyla denend
 - [-] Cloak motoru, donor çerezleri, profil klonlama. Gerekirse sonra eklenecek.
 - [-] Legacy paket uyumluluk katmanları (gserp, google-browser-scraper).
 - [-] flaregun'un fetch modu (gerçek IP'yi sızdırıyor) ve CFspider'ın VLESS, panel ve kod gizleme bölümleri.
+- [+] npm paketi hazır: `@gitupcms/gitup-serp` (0.1.0). `gitup-serp setup | egress up/down/ls | serve | mcp | canary | search | doctor`. Paketlenmiş hali geçici bir klasöre kurulup denendi (doctor, serve, mcp, egress). Yayınlamak için `npm login` gerekiyor (kullanıcı).
