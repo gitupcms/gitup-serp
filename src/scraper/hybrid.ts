@@ -44,7 +44,7 @@ export interface BrowserSide {
 }
 
 export interface HttpSide {
-  get(url: string, headers: Headers, signal?: AbortSignal, body?: string): Promise<Fetched & { setCookies: string[] }>;
+  get(url: string, headers: Headers, signal?: AbortSignal): Promise<Fetched & { setCookies: string[] }>;
 }
 
 /** Milliseconds a results page spent on each side, added to by `Hybrid.fetch`. */
@@ -149,11 +149,9 @@ export class CurlHttp implements HttpSide {
     process.env.CURL_IMPERSONATE_HEADERS = "no";
   }
 
-  /** With `body`, a form POST instead (DuckDuckGo's next page). */
-  async get(url: string, headers: Headers, signal?: AbortSignal, body?: string) {
+  async get(url: string, headers: Headers, signal?: AbortSignal) {
     const lines = ["silent", "show-error", "include", "compressed", "suppress-connect-headers"];
     lines.push(`max-time = ${HTTP_TIMEOUT_S}`, `url = ${quote(url)}`);
-    if (body !== undefined) lines.push(`data-raw = ${quote(body)}`);
     for (const [n, v] of headers) lines.push(`header = ${quote(`${n}: ${v}`)}`);
     if (this.proxy) {
       lines.push(`proxy = ${quote(this.proxy.server)}`);

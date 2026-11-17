@@ -26,19 +26,17 @@ describe("parseDdg", () => {
       snippet: expect.stringMatching(/^10 Best Hiking Boots of 2026 We trail-tested/),
     });
     for (const o of r.organic_results) expect(o.link).toMatch(/^https?:\/\/(?!duckduckgo\.com)/);
-    expect(r.next).toMatchObject({ q: "best hiking boots", s: "10", vqd: expect.stringMatching(/^4-\d+$/), kl: "us-en" });
   });
 
-  it("page 2: direct links, and the Next form, not the Previous one", () => {
+  it("page 2: direct links", () => {
     const r = parseDdg(P2);
     expect(r.organic_results).toHaveLength(15);
     expect(r.organic_results[0]).toMatchObject({ position: 1, link: "https://gearjunkie.com/footwear/best-hiking-boots" });
     expect(r.organic_results.at(-1)!.position).toBe(15);
-    expect(r.next).toMatchObject({ s: "25", vqd: expect.any(String) });
   });
 
-  it("finds no results and no form on the anomaly page", () => {
-    expect(parseDdg(ANOMALY)).toEqual({ organic_results: [], next: null });
+  it("finds no results on the anomaly page", () => {
+    expect(parseDdg(ANOMALY)).toEqual({ organic_results: [] });
   });
 });
 
@@ -51,12 +49,12 @@ describe("ddgAnomaly", () => {
   });
 });
 
-type Call = { url: string; headers: Headers; body?: string };
+type Call = { url: string; headers: Headers };
 function fakeHttp(pages: { status: number; html: string }[]) {
   const calls: Call[] = [];
   const http: HttpSide = {
-    get: async (url, headers, _signal, body) => {
-      calls.push({ url, headers, ...(body !== undefined && { body }) });
+    get: async (url, headers) => {
+      calls.push({ url, headers });
       const p = pages.shift() ?? { status: 200, html: P1 };
       return { url, status: p.status, html: p.html, setCookies: [] };
     },
@@ -77,29 +75,11 @@ describe("DdgSearcher", () => {
     expect(r.error).toBeUndefined();
   });
 
-  it("page 2 POSTs page 1's Next form with Referer and Origin", async () => {
-    const { http, calls } = fakeHttp([
-      { status: 200, html: P1 },
-      { status: 200, html: P2 },
-    ]);
-    const r = await new DdgSearcher(http, 0).search({ ...P, page: 2 });
-    expect(calls).toHaveLength(2);
-    expect(calls[1]!.url).toBe(DDG_URL);
-    expect(calls[1]!.headers).toEqual([
-      ["Referer", "https://html.duckduckgo.com/"],
-      ["Origin", "https://html.duckduckgo.com"],
-    ]);
-    const form = new URLSearchParams(calls[1]!.body);
-    expect(form.get("s")).toBe("10");
-    expect(form.get("vqd")).toBe(parseDdg(P1).next!.vqd);
-    expect(form.get("q")).toBe("best hiking boots");
-    expect((r.organic_results as { link: string }[])[0]!.link).toBe("https://gearjunkie.com/footwear/best-hiking-boots");
-  });
-
-  it("refuses pages past 5 without a request", async () => {
+  it("serves page 1 only, refusing later pages without a request", async () => {
     const { http, calls } = fakeHttp([]);
-    const r = await new DdgSearcher(http, 0).search({ ...P, page: 6 });
+    const r = await new DdgSearcher(http, 0).search({ ...P, page: 2 });
     expect(r.search_metadata.status).toBe("Error");
+    expect(r.error).toBe("duckduckgo fallback serves page 1 only");
     expect(calls).toHaveLength(0);
   });
 

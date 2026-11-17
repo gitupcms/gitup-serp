@@ -1,29 +1,24 @@
 // DuckDuckGo as the last fallback (`ENGINE_FALLBACK=duckduckgo`), only while Google refuses.
 // Its HTML endpoint needs no browser, so it runs over the Cloudflare tunnel through curl-impersonate.
 //
-// Page 1 is a GET; DuckDuckGo ignores `s=` on a GET, so page N walks N-1 "Next" forms by POST.
-// The forms carry a `vqd` token; a POST without it gets the anomaly (captcha) page.
+// Page 1 only: later pages need a POST with a `vqd` token from page 1, and DuckDuckGo answers that
+// POST with its anomaly page when it comes from another IP, which the Cloudflare egress always is.
 
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ddgAnomaly, parseDdg } from "../parse/ddg.js";
 import type { SearchParams, Searcher, SerpRecord, Verdict } from "../types.js";
-import { CURL_BIN, CurlHttp, type Headers, type HttpSide, IMPERSONATE } from "./hybrid.js";
+import { CURL_BIN, CurlHttp, type HttpSide, IMPERSONATE } from "./hybrid.js";
 import { type ProxyEndpoint, redact } from "./proxy.js";
 
 export const DDG_URL = "https://html.duckduckgo.com/html/";
 /** The impersonate wrapper: it sends Chrome's own header set, the only one DuckDuckGo passed in the probe. */
 export const DDG_CURL = resolve(CURL_BIN, "..", `curl_${IMPERSONATE}`);
-/** Least gap between two DuckDuckGo requests, page walks included. */
+/** Least gap between two DuckDuckGo requests. */
 export const DDG_GAP_MS = 2_000;
 /** Down this long after an anomaly page. */
 export const DDG_DOWN_MS = 600_000;
-export const DDG_MAX_PAGE = 5;
-const POST_HEADERS: Headers = [
-  ["Referer", "https://html.duckduckgo.com/"],
-  ["Origin", "https://html.duckduckgo.com"],
-];
 
 /** DuckDuckGo's region code, e.g. us-en; wt-wt (no region) without gl. */
 export function ddgRegion(p: SearchParams): string {
@@ -52,25 +47,18 @@ export class DdgSearcher implements Searcher {
 
   async search(params: SearchParams, signal?: AbortSignal): Promise<SerpRecord> {
     const started = performance.now();
-    if (params.page > DDG_MAX_PAGE) return record(params, started, null, null, { error: `duckduckgo serves pages 1 to ${DDG_MAX_PAGE}` });
+    if (params.page > 1) return record(params, started, null, null, { error: "duckduckgo fallback serves page 1 only" });
     const wait = this.retryIn();
     if (wait > 0) return record(params, started, null, null, { error: `duckduckgo is down: anomaly page; retry after ${wait} s` });
     const url = `${DDG_URL}?${new URLSearchParams({ q: params.q, kl: ddgRegion(params) })}`;
     try {
-      let r = await this.fetch(url, [], signal);
-      for (let page = 1; ; page++) {
-        if (ddgAnomaly(r.status, r.html)) {
-          this.downUntil = performance.now() + this.downMs;
-          console.error(`duckduckgo down for ${Math.round(this.downMs / 1000)}s: anomaly page`);
-          return record(params, started, url, { kind: "sorry", reason: "duckduckgo anomaly page" }, { error: "duckduckgo refused: anomaly page" });
-        }
-        const parsed = parseDdg(r.html);
-        if (page === params.page) {
-          return record(params, started, url, { kind: "serp", reason: "duckduckgo results" }, { organic_results: parsed.organic_results });
-        }
-        if (!parsed.next) return record(params, started, url, { kind: "serp", reason: "duckduckgo results" }, { organic_results: [] });
-        r = await this.fetch(DDG_URL, POST_HEADERS, signal, new URLSearchParams(parsed.next).toString());
+      const r = await this.fetch(url, signal);
+      if (ddgAnomaly(r.status, r.html)) {
+        this.downUntil = performance.now() + this.downMs;
+        console.error(`duckduckgo down for ${Math.round(this.downMs / 1000)}s: anomaly page`);
+        return record(params, started, url, { kind: "sorry", reason: "duckduckgo anomaly page" }, { error: "duckduckgo refused: anomaly page" });
       }
+      return record(params, started, url, { kind: "serp", reason: "duckduckgo results" }, { organic_results: parseDdg(r.html).organic_results });
     } catch (err) {
       if (signal?.aborted) throw err;
       return record(params, started, url, null, { error: redact(err instanceof Error ? err.message : String(err)) });
@@ -79,12 +67,12 @@ export class DdgSearcher implements Searcher {
 
   async close(): Promise<void> {}
 
-  private async fetch(url: string, headers: Headers, signal?: AbortSignal, body?: string) {
+  private async fetch(url: string, signal?: AbortSignal) {
     const now = performance.now();
     const at = Math.max(now, this.nextAt);
     this.nextAt = at + this.gapMs;
     if (at > now) await sleep(at - now, undefined, { signal });
-    return this.http.get(url, headers, signal, body);
+    return this.http.get(url, [], signal);
   }
 
   private retryIn(): number {
